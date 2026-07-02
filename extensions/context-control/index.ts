@@ -21,7 +21,7 @@ import {
 import { Key, type OverlayHandle } from "@earendil-works/pi-tui";
 import { formatCompact } from "./estimate.ts";
 import type { AnyMessage } from "./keys.ts";
-import { indexLeaves, type LeafIndex } from "./leaves.ts";
+import { indexLeaves, type LeafIndex, maskedLeafCount, pruneStaleMasks } from "./leaves.ts";
 import { applyMask, MaskState, toggleNodeMask } from "./masking.ts";
 import { ContextPanel, type ViewMode } from "./panel.ts";
 import { type Preset, PRESETS, toPreset, type UserPresetConfig } from "./presets.ts";
@@ -79,26 +79,32 @@ export default function contextControl(pi: ExtensionAPI): void {
 		return theme.fg("dim", `ctx ${formatCompact(raw)}`);
 	}
 
-	/** One-line widget below the editor, shown only while masks are active. */
-	function widgetLine(theme: Theme, model: ContextTreeModel): string {
+	/** One-line widget below the editor, shown only while masking hides something. */
+	function widgetLine(theme: Theme, model: ContextTreeModel, maskedItems: number): string {
 		const raw = model.rawTotal;
 		const effective = model.effectiveTotal;
 		const pct = raw > 0 ? Math.round((effective / raw) * 100) : 100;
 		return (
 			theme.fg("warning", " ◐ context-control ") +
 			theme.fg("text", `${formatCompact(effective)} of ${formatCompact(raw)} sent (${pct}%)`) +
-			theme.fg("muted", ` · ${state.size} mask${state.size === 1 ? "" : "s"} · /ctx to manage`)
+			theme.fg("muted", ` · ${maskedItems} item${maskedItems === 1 ? "" : "s"} masked · /ctx to manage`)
 		);
 	}
 
 	function refresh(ctx: ExtensionContext): void {
-		const models = buildModels(contextIndex(ctx));
+		const idx = contextIndex(ctx);
+		const models = buildModels(idx);
 		panel?.setModels(models);
 		if (!ctx.hasUI) return;
+		// Count what the masks actually hide, not raw mask ids: an armed group
+		// rule with no matching content yet should not claim anything is masked.
+		const maskedItems = maskedLeafCount(state, idx);
 		ctx.ui.setStatus("context-control", statusText(ctx.ui.theme, models.general));
-		ctx.ui.setWidget("context-control", state.size > 0 ? [widgetLine(ctx.ui.theme, models.general)] : undefined, {
-			placement: "belowEditor",
-		});
+		ctx.ui.setWidget(
+			"context-control",
+			maskedItems > 0 ? [widgetLine(ctx.ui.theme, models.general, maskedItems)] : undefined,
+			{ placement: "belowEditor" },
+		);
 	}
 
 	function persist(): void {
@@ -122,6 +128,7 @@ export default function contextControl(pi: ExtensionAPI): void {
 		}
 		state.load(saved?.masked);
 		presetValues = saved?.presetValues ?? {};
+		if (pruneStaleMasks(state, contextIndex(ctx)) > 0) persist();
 		allPresets = [...PRESETS, ...loadUserPresets(ctx.cwd)];
 		refresh(ctx);
 	});

@@ -16,7 +16,7 @@ import {
 	IMAGE_TOKENS,
 } from "./estimate.ts";
 import { advanceTurn, type AnyMessage, TURN_PRE, turnIdFor } from "./keys.ts";
-import { chains, maskedResultStub } from "./masking.ts";
+import { chains, maskedResultStub, type MaskState } from "./masking.ts";
 import { firstLine, summarizeArgs, textOf } from "./summarize.ts";
 
 export type LeafKind =
@@ -57,6 +57,31 @@ export interface LeafIndex {
 	turns: TurnInfo[];
 	messageCount: number;
 	roleCounts: { assistant: number; user: number; tool: number };
+}
+
+/** Leaves the current mask set actually hides (drives the widget count). */
+export function maskedLeafCount(state: MaskState, idx: LeafIndex): number {
+	return idx.leaves.reduce((n, leaf) => n + (state.anyMasked(leaf.chain) ? 1 : 0), 0);
+}
+
+/**
+ * Drop mask ids that reference content no longer in the session (turns,
+ * pairs, or individual items — anything with a ":" in its id). Such ids can
+ * linger after compaction or from older toggle semantics; they hide nothing
+ * but inflate the mask count. Group ids (no ":") are kept: they are armed
+ * rules that legitimately cover matching content as it arrives.
+ */
+export function pruneStaleMasks(state: MaskState, idx: LeafIndex): number {
+	const known = new Set<string>();
+	for (const leaf of idx.leaves) for (const id of leaf.chain) known.add(id);
+	let pruned = 0;
+	for (const id of state.toJSON()) {
+		if (id.includes(":") && !known.has(id)) {
+			state.remove(id);
+			pruned++;
+		}
+	}
+	return pruned;
 }
 
 export function indexLeaves(messages: AnyMessage[]): LeafIndex {

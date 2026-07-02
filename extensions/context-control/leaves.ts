@@ -59,6 +59,27 @@ export interface LeafIndex {
 	roleCounts: { assistant: number; user: number; tool: number };
 }
 
+/** Tool calls masked away entirely; their paired results are dropped, not stubbed. */
+export function droppedCallIds(idx: LeafIndex, state: MaskState): Set<string> {
+	const dropped = new Set<string>();
+	for (const leaf of idx.leaves) {
+		if (leaf.kind === "tool-call" && leaf.toolCallId && state.anyMasked(leaf.chain)) {
+			dropped.add(leaf.toolCallId);
+		}
+	}
+	return dropped;
+}
+
+/** What a leaf costs after the mask set: 0 when dropped, the stub cost when stubbed. */
+export function leafEffective(leaf: LeafInfo, state: MaskState, droppedCalls: Set<string>): number {
+	if (leaf.kind === "tool-result") {
+		if (leaf.toolCallId && droppedCalls.has(leaf.toolCallId)) return 0;
+		if (state.anyMasked(leaf.chain)) return Math.min(leaf.raw, leaf.stubTokens ?? 0);
+		return leaf.raw;
+	}
+	return state.anyMasked(leaf.chain) ? 0 : leaf.raw;
+}
+
 /** Leaves the current mask set actually hides (drives the widget count). */
 export function maskedLeafCount(state: MaskState, idx: LeafIndex): number {
 	return idx.leaves.reduce((n, leaf) => n + (state.anyMasked(leaf.chain) ? 1 : 0), 0);

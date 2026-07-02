@@ -13,6 +13,7 @@
 
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { type Focusable, matchesKey, type TUI, visibleWidth } from "@earendil-works/pi-tui";
+import type { ToggleImpact } from "./cache.ts";
 import { formatCompact, formatExact } from "./estimate.ts";
 import type { Preset } from "./presets.ts";
 import type { ContextTreeModel, TreeNode } from "./tree.ts";
@@ -20,9 +21,28 @@ import type { ContextTreeModel, TreeNode } from "./tree.ts";
 export type TokenMode = "effective" | "raw";
 export type ViewMode = "general" | "session";
 
+/** What the panel knows about the prompt cache (computed outside, pushed in). */
+export interface CacheStatus {
+	/** A call has happened, so a cached prefix exists to protect. */
+	hasSnapshot: boolean;
+	/** Real cached prompt size from the provider's usage numbers, when known. */
+	actualCached?: number;
+	/** Mask changes since the last call will break the cache on the next one. */
+	pending?: {
+		/** First cached leaf whose sent form changed. */
+		breakLeafId: string;
+		brokenTokens: number;
+		rewrittenTokens: number;
+		/** Where the break lands, e.g. "turn 3". */
+		where: string;
+	};
+}
+
 export interface PanelCallbacks {
 	/** Toggle mask state for a node; caller rebuilds the models and calls setModels(). */
 	onToggleMask: (node: TreeNode) => void;
+	/** Preview what toggling this node would do to per-call cost and the cache. */
+	onImpact: (node: TreeNode) => ToggleImpact;
 	/** Apply a mask preset with its current value; caller rebuilds and calls setModels(). */
 	onPreset: (preset: Preset, value: number | undefined) => void;
 	/** Persist tuned preset values. */
@@ -59,6 +79,9 @@ export class ContextPanel implements Focusable {
 	private presetMode = false;
 	private presetSelected = 0;
 
+	private cacheStatus: CacheStatus = { hasSnapshot: false };
+	private impactMemo: { id: string; impact: ToggleImpact } | undefined;
+
 	private tui: TUI;
 	private theme: Theme;
 	private callbacks: PanelCallbacks;
@@ -88,6 +111,7 @@ export class ContextPanel implements Focusable {
 	setModels(models: Record<ViewMode, ContextTreeModel>): void {
 		const selectedId = this.rows[this.selected[this.view]]?.node.id;
 		this.models = models;
+		this.impactMemo = undefined;
 		this.rebuildRows();
 		if (selectedId) {
 			const idx = this.rows.findIndex((r) => r.node.id === selectedId);
@@ -95,6 +119,53 @@ export class ContextPanel implements Focusable {
 		}
 		this.selected[this.view] = Math.min(this.selected[this.view], Math.max(0, this.rows.length - 1));
 		this.tui.requestRender();
+	}
+
+	setCacheStatus(status: CacheStatus): void {
+		this.cacheStatus = status;
+		this.impactMemo = undefined;
+		this.tui.requestRender();
+	}
+
+	private impactFor(node: TreeNode): ToggleImpact {
+		if (this.impactMemo?.id !== node.id) {
+			this.impactMemo = { id: node.id, impact: this.callbacks.onImpact(node) };
+		}
+		return this.impactMemo.impact;
+	}
+
+	/** "mask: saves ~1.2K/call · rewrites ~8.0K cached · pays off in ~5 calls" */
+	private impactText(node: TreeNode): string {
+		const impact = this.impactFor(node);
+		const delta = impact.deltaPerCall;
+		const rewritten = impact.extraRewrittenTokens;
+		if (delta === 0) {
+			// A stub can cost as much as a tiny result: masking changes the bytes
+			// (breaking the cache) without shrinking anything.
+			return rewritten > 0 ? `mask: saves nothing · rewrites ~${formatCompact(rewritten)} cached — not worth it` : "";
+		}
+		if (delta < 0) {
+			const base = `unmask: adds ~${formatCompact(-delta)}/call back`;
+			if (!impact.hasCache) return base;
+			return rewritten > 0 ? `${base} · rewrites ~${formatCompact(rewritten)} cached` : `${base} · breaks no cache`;
+		}
+		const base = `mask: saves ~${formatCompact(delta)}/call`;
+		if (!impact.hasCache) return `${base} · nothing cached yet`;
+		if (rewritten === 0) return `${base} · breaks no cache`;
+		const calls = impact.paybackCalls ?? 0;
+		return `${base} · rewrites ~${formatCompact(rewritten)} cached · pays off in ~${calls} call${calls === 1 ? "" : "s"}`;
+	}
+
+	/** Deepest visible row containing the pending break leaf (session view only). */
+	private boundaryRowIndex(): number {
+		const id = this.cacheStatus.pending?.breakLeafId;
+		if (!id || this.view !== "session") return -1;
+		const contains = (n: TreeNode): boolean => n.id === id || n.children.some(contains);
+		let idx = -1;
+		this.rows.forEach((row, i) => {
+			if (contains(row.node)) idx = i;
+		});
+		return idx;
 	}
 
 	private presetValue(preset: Preset): number | undefined {
@@ -299,6 +370,17 @@ export class ContextPanel implements Focusable {
 				),
 			),
 		);
+		// Pending cache break: masks changed since the last call take effect (and
+		// break the cache once, at the earliest change) on the next call.
+		const pending = this.cacheStatus.pending;
+		if (pending && !this.presetMode) {
+			const cached = this.cacheStatus.actualCached;
+			const note =
+				`⚡ pending: cache breaks at ${pending.where} · ` +
+				`~${formatCompact(pending.rewrittenTokens)} rewritten next call` +
+				(cached ? ` (${formatCompact(cached)} cached now)` : "");
+			lines.push(boxRow(th.fg("warning", note.slice(0, innerW - 2))));
+		}
 		lines.push(boxRow(th.fg("borderMuted", "─".repeat(innerW - 2))));
 
 		// Body
@@ -313,16 +395,24 @@ export class ContextPanel implements Focusable {
 		this.clampScroll();
 		const visible = Math.min(BODY_MAX_ROWS, this.rows.length);
 		const scroll = this.scroll[this.view];
+		const boundary = this.boundaryRowIndex();
 		for (let i = scroll; i < scroll + visible; i++) {
 			const row = this.rows[i];
 			if (!row) break;
+			// Session view is chronological = cache order, so the break point is a
+			// real line in the list: everything below it is rewritten next call.
+			if (i === boundary) {
+				const label = "┄┄ cache breaks here · everything below is rewritten next call ";
+				lines.push(boxRow(th.fg("warning", label.slice(0, innerW - 2).padEnd(innerW - 2, "┄"))));
+			}
 			lines.push(this.renderRow(row, i === this.selected[this.view], innerW));
 		}
 
-		// Footer position indicator
-		lines.push(
-			boxRow(th.fg("dim", `(${this.rows.length === 0 ? 0 : this.selected[this.view] + 1}/${this.rows.length})`)),
-		);
+		// Footer: position + what toggling the selected node would cost/save.
+		const selectedRow = this.rows[this.selected[this.view]];
+		const pos = th.fg("dim", `(${this.rows.length === 0 ? 0 : this.selected[this.view] + 1}/${this.rows.length})`);
+		const impact = selectedRow && this.focused ? this.impactText(selectedRow.node) : "";
+		lines.push(boxRow(impact ? `${pos}${th.fg("muted", " · ")}${th.fg("text", impact.slice(0, innerW - 12))}` : pos));
 		lines.push(th.fg("border", `╰${"─".repeat(innerW)}╯`));
 		return lines;
 	}

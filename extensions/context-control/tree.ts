@@ -12,7 +12,7 @@
  */
 
 import { groups, pairId } from "./keys.ts";
-import type { LeafIndex, LeafInfo, LeafKind } from "./leaves.ts";
+import { droppedCallIds, type LeafIndex, type LeafInfo, type LeafKind, leafEffective } from "./leaves.ts";
 import type { MaskState } from "./masking.ts";
 
 export interface TreeNode {
@@ -109,26 +109,6 @@ class TreeBuilder {
 			effectiveTotal: roots.reduce((sum, r) => sum + r.effectiveTokens, 0),
 		};
 	}
-}
-
-/** Tool calls masked away entirely; their paired results are dropped, not stubbed. */
-function droppedCallIds(idx: LeafIndex, state: MaskState): Set<string> {
-	const dropped = new Set<string>();
-	for (const leaf of idx.leaves) {
-		if (leaf.kind === "tool-call" && leaf.toolCallId && state.anyMasked(leaf.chain)) {
-			dropped.add(leaf.toolCallId);
-		}
-	}
-	return dropped;
-}
-
-function leafEffective(leaf: LeafInfo, state: MaskState, droppedCalls: Set<string>): number {
-	if (leaf.kind === "tool-result") {
-		if (leaf.toolCallId && droppedCalls.has(leaf.toolCallId)) return 0;
-		if (state.anyMasked(leaf.chain)) return Math.min(leaf.raw, leaf.stubTokens ?? 0);
-		return leaf.raw;
-	}
-	return state.anyMasked(leaf.chain) ? 0 : leaf.raw;
 }
 
 /** General view: role → content-type → tool. */

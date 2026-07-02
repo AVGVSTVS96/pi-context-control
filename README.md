@@ -57,6 +57,18 @@ Run `/ctx` (or `ctrl+alt+c`) to open the panel:
   5. Clear all masks
   ```
 
+- The panel is **cache-aware**. Prompt caching is prefix-based: the provider caches the prompt exactly as sent on the last call, and any edit — masking *or* unmasking — rewrites everything after the edit point once (~1.25x base price) before the smaller prompt reads cheap again (~0.1x). Masking near the tail is nearly free; masking early content pays a large one-time rewrite for a small per-call saving. The panel prices this so you never guess:
+  - the footer previews the selected node before you press space: `mask: saves ~1.2K/call · rewrites ~8.0K cached · pays off in ~16 calls` (or `unmask: adds ~… back`, or `saves nothing · … — not worth it` when a tiny result's stub costs as much as the content it hides);
+  - changes since the last call show a pending line — batched masks break the cache **once**, at the earliest change: `⚡ pending: cache breaks at turn 3 · ~8.0K rewritten next call (45.2K cached now)`. The cached size is the provider's real usage number (`input + cacheRead + cacheWrite`), not an estimate;
+  - the session view draws the break point in place, since chronological order *is* cache order:
+
+    ```
+    ├─ ○ user · run ls with bash, then reply with just: done
+    ┄┄ cache breaks here · everything below is rewritten next call ┄┄┄┄┄┄
+    ├─ ● bash · ls
+    ╰─ ○ assistant · done
+    ```
+  - while a break is pending, the below-editor widget warns `· next call rewrites ~8.0K cache` (even if you unmasked back to zero masks — restoring bytes breaks the cache too).
 - The panel renders **in flow** between the transcript and the input (not as an overlay covering content), and stacks vertically with above-editor widgets from other extensions. The editor keeps real focus the whole time — the panel claims the keyboard via an input listener.
 - `i` hands the keyboard back to the editor while the panel stays visible; `/ctx` or `ctrl+alt+c` grabs it back. `esc` closes the panel. `ctrl+c`/`ctrl+d` always pass through to pi.
 - Mask state persists in the session (as a `custom` entry pi never sends to the model) and is restored on `/resume`.
@@ -108,5 +120,5 @@ Token counts are estimates (chars/4, matching pi's own estimator, plus a correct
 
 - ~~Phase 2 (QoL)~~ shipped: usage widget + footer status, mask presets, richer stubs.
 - ~~Phase 3 (session view + preset control)~~ shipped: chronological turn/pair view, cross-view masking, tunable and user-defined presets.
-- Phase 4 (cache awareness): visualize prompt-cache impact of masking. Caching is prefix-based, so masking any item invalidates the cache for everything after it — the suffix is rewritten to cache on the next call, then the smaller prefix caches again and the savings recur every call. Planned: per-node impact preview when selected ("saves ~X/call · breaks ~Y cached · pays off after ~N calls"), a pending-changes line showing the earliest cache-break point (batched masks break the cache once), a tree marker at that boundary, and real `cacheRead`/`cacheWrite` numbers from pi's recorded usage to keep estimates honest.
+- ~~Phase 4 (cache awareness)~~ shipped: per-node impact preview ("saves ~X/call · rewrites ~Y cached · pays off in ~N calls"), pending-changes line with the earliest break point, session-view break boundary marker, widget warning, real `cacheRead`/`cacheWrite` numbers from pi's recorded usage.
 - Phase 5 (summarization): non-destructive summarization — swap a masked span for a generated summary at send time, integrate with pi compaction.

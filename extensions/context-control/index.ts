@@ -19,11 +19,12 @@ import {
 	type Theme,
 } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey } from "@earendil-works/pi-tui";
+import { diffAgainstSnapshot, type SentSnapshot, sentStream, toggleImpact } from "./cache.ts";
 import { formatCompact } from "./estimate.ts";
 import type { AnyMessage } from "./keys.ts";
 import { indexLeaves, type LeafIndex, maskedLeafCount, pruneStaleMasks } from "./leaves.ts";
 import { applyMask, MaskState, toggleNodeMask } from "./masking.ts";
-import { ContextPanel, type ViewMode } from "./panel.ts";
+import { type CacheStatus, ContextPanel, type ViewMode } from "./panel.ts";
 import { type Preset, PRESETS, toPreset, type UserPresetConfig } from "./presets.ts";
 import { buildSessionTree, buildTree, type ContextTreeModel } from "./tree.ts";
 
@@ -59,10 +60,16 @@ export default function contextControl(pi: ExtensionAPI): void {
 	let panel: ContextPanel | undefined;
 	let panelFocused = false;
 	let closePanel: (() => void) | undefined;
+	/** What the last LLM call actually sent (post-mask) — i.e. what is cached. */
+	let lastSent: SentSnapshot | undefined;
+
+	function contextMessages(ctx: ExtensionContext): AnyMessage[] {
+		const sm = ctx.sessionManager;
+		return buildSessionContext(sm.getEntries(), sm.getLeafId()).messages as AnyMessage[];
+	}
 
 	function contextIndex(ctx: ExtensionContext): LeafIndex {
-		const sm = ctx.sessionManager;
-		return indexLeaves(buildSessionContext(sm.getEntries(), sm.getLeafId()).messages as AnyMessage[]);
+		return indexLeaves(contextMessages(ctx));
 	}
 
 	function buildModels(idx: LeafIndex): Record<ViewMode, ContextTreeModel> {
@@ -80,22 +87,61 @@ export default function contextControl(pi: ExtensionAPI): void {
 		return theme.fg("dim", `ctx ${formatCompact(raw)}`);
 	}
 
-	/** One-line widget below the editor, shown only while masking hides something. */
-	function widgetLine(theme: Theme, model: ContextTreeModel, maskedItems: number): string {
+	/** One-line widget below the editor while masks hide something or a cache break is pending. */
+	function widgetLine(theme: Theme, model: ContextTreeModel, maskedItems: number, cache: CacheStatus): string {
 		const raw = model.rawTotal;
 		const effective = model.effectiveTotal;
 		const pct = raw > 0 ? Math.round((effective / raw) * 100) : 100;
 		return (
 			theme.fg("warning", " ◐ context-control ") +
 			theme.fg("text", `${formatCompact(effective)} of ${formatCompact(raw)} sent (${pct}%)`) +
-			theme.fg("muted", ` · ${maskedItems} item${maskedItems === 1 ? "" : "s"} masked · /ctx to manage`)
+			(maskedItems > 0 ? theme.fg("muted", ` · ${maskedItems} item${maskedItems === 1 ? "" : "s"} masked`) : "") +
+			(cache.pending
+				? theme.fg("warning", ` · next call rewrites ~${formatCompact(cache.pending.rewrittenTokens)} cache`)
+				: "") +
+			theme.fg("muted", " · /ctx to manage")
 		);
 	}
 
+	/** Real prompt size of the last call (input + cacheRead + cacheWrite). */
+	function lastActualPrompt(messages: AnyMessage[]): number | undefined {
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const m = messages[i] as { role?: string; usage?: { input: number; cacheRead: number; cacheWrite: number } };
+			if (m.role === "assistant" && m.usage) {
+				return m.usage.input + m.usage.cacheRead + m.usage.cacheWrite;
+			}
+		}
+		return undefined;
+	}
+
+	/** Diff what we would send now against what the last call cached. */
+	function cacheStatus(idx: LeafIndex): CacheStatus {
+		const brk = diffAgainstSnapshot(sentStream(idx, state), lastSent);
+		const status: CacheStatus = {
+			hasSnapshot: (lastSent?.ids.length ?? 0) > 0,
+			actualCached: lastSent?.actualPrompt,
+		};
+		if (brk.breakLeafId) {
+			const leaf = idx.leaves.find((l) => l.id === brk.breakLeafId);
+			const turnIndex = leaf ? idx.turns.findIndex((t) => t.id === leaf.turnId) : -1;
+			status.pending = {
+				breakLeafId: brk.breakLeafId,
+				brokenTokens: brk.brokenTokens,
+				rewrittenTokens: brk.rewrittenTokens,
+				where: turnIndex >= 0 ? `turn ${turnIndex + 1}` : "earlier content",
+			};
+		}
+		return status;
+	}
+
 	function refresh(ctx: ExtensionContext): void {
-		const idx = contextIndex(ctx);
+		const messages = contextMessages(ctx);
+		const idx = indexLeaves(messages);
 		const models = buildModels(idx);
+		if (lastSent) lastSent.actualPrompt = lastActualPrompt(messages);
+		const cache = cacheStatus(idx);
 		panel?.setModels(models);
+		panel?.setCacheStatus(cache);
 		if (!ctx.hasUI) return;
 		// Count what the masks actually hide, not raw mask ids: an armed group
 		// rule with no matching content yet should not claim anything is masked.
@@ -103,7 +149,9 @@ export default function contextControl(pi: ExtensionAPI): void {
 		ctx.ui.setStatus("context-control", statusText(ctx.ui.theme, models.general));
 		ctx.ui.setWidget(
 			"context-control",
-			maskedItems > 0 ? [widgetLine(ctx.ui.theme, models.general, maskedItems)] : undefined,
+			maskedItems > 0 || cache.pending
+				? [widgetLine(ctx.ui.theme, models.general, maskedItems, cache)]
+				: undefined,
 			{ placement: "belowEditor" },
 		);
 	}
@@ -113,9 +161,13 @@ export default function contextControl(pi: ExtensionAPI): void {
 	}
 
 	// The masking hook: filter/rewrite the outgoing messages on every LLM call.
+	// Also the cache bookkeeping moment: what goes out on this call is exactly
+	// what the provider will have cached when the next one is planned.
 	pi.on("context", async (event) => {
+		const messages = event.messages as AnyMessage[];
+		lastSent = sentStream(indexLeaves(messages), state);
 		if (state.size === 0) return;
-		return { messages: applyMask(event.messages as AnyMessage[], state) as typeof event.messages };
+		return { messages: applyMask(messages, state) as typeof event.messages };
 	});
 
 	// Restore persisted state; close any panel left over from a previous session.
@@ -172,6 +224,7 @@ export default function contextControl(pi: ExtensionAPI): void {
 						persist();
 						refresh(ctx);
 					},
+					onImpact: (node) => toggleImpact(node, contextIndex(ctx), state, lastSent),
 					onPreset: (preset, value) => {
 						if (preset.apply(state, contextIndex(ctx), value) > 0) persist();
 						refresh(ctx);
@@ -189,6 +242,9 @@ export default function contextControl(pi: ExtensionAPI): void {
 			{ placement: "aboveEditor" },
 		);
 		panelFocused = true;
+		// The widget factory ran synchronously above, so the panel exists now
+		// (TS can't see through the closure assignment).
+		(panel as ContextPanel | undefined)?.setCacheStatus(cacheStatus(contextIndex(ctx)));
 
 		// The editor keeps real focus; this listener runs first in the TUI's
 		// input chain and feeds the panel while it claims the keyboard.

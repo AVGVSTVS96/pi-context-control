@@ -96,7 +96,6 @@ export const chains = {
 export interface MaskableNode {
 	id: string;
 	isLeaf: boolean;
-	masked: boolean;
 	children: MaskableNode[];
 	/** Leaves carry their full covering chain (own id included). */
 	chain?: readonly string[];
@@ -118,23 +117,27 @@ function collectLeafRefs(node: MaskableNode, out: LeafRef[] = []): LeafRef[] {
 }
 
 /**
- * Toggle a node's mask. Unmasking a node hidden by a group mask "explodes"
- * that mask at leaf granularity: the group id is removed and every OTHER
- * leaf it covered gets its own mask, so only the requested node comes back.
- * Because coverage is chain-based, this works no matter which view created
- * the group mask (a type group, a turn, or a pair row).
+ * Toggle a node's mask — a clean two-state cycle no matter how the current
+ * masks came about:
+ *
+ *   anything masked in/over this subtree → clear it all (fully visible)
+ *   nothing masked                       → mask the whole node
+ *
+ * So a partially-masked parent unmasks all children first, and masks them
+ * all on the next press. Clearing a mask held by a group id that also covers
+ * leaves OUTSIDE this subtree "explodes" it at leaf granularity: the group id
+ * is removed and every other leaf it covered gets its own mask, so only the
+ * requested subtree comes back. Because coverage is chain-based, this works
+ * no matter which view created the mask (a type group, a turn, or a pair).
  */
 export function toggleNodeMask(state: MaskState, node: MaskableNode, allLeaves: readonly LeafRef[]): void {
-	if (state.has(node.id)) {
-		state.remove(node.id);
-		return;
-	}
-	if (!node.masked) {
+	const targets = collectLeafRefs(node);
+	const targetIds = new Set(targets.map((t) => t.id));
+	if (!state.has(node.id) && !targets.some((t) => state.anyMasked(t.chain))) {
 		state.add(node.id);
 		return;
 	}
-	const targets = collectLeafRefs(node);
-	const targetIds = new Set(targets.map((t) => t.id));
+	state.remove(node.id);
 	// Each pass removes at least one covering id and never re-adds one, so
 	// this terminates; the guard is belt-and-suspenders.
 	for (let guard = 0; guard < 1000; guard++) {

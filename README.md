@@ -42,12 +42,12 @@ Run `/ctx` (or `ctrl+alt+c`) to open the panel:
   ╰─ ○ assistant · Added tests/config-loader.test.ts…        1x      17 tokens
   ```
 
-- Circle markers show **mask state only**: **○** in context · **◐** partially masked · **✕** masked out. Fold state lives in the tree lines: the connector touching a folded node's marker is highlighted orange — a collapsed turn's preview elbow, a collapsed group's incoming `├─`/`╰─`. Top-level groups in the general view have no connector, so a folded one shows its label in **bold** instead (they start expanded; folding one is deliberate).
+- Markers show mask state: **○** in context · **◐** partially masked · **✕** masked out. Folded nodes show their label in **bold**.
 
-- `space` masks/unmasks the selected node — a group, a turn, a pair, or a single item. It is a clean two-state cycle: if **anything** under the node is masked (even partially, even by a mask set in the other view), the first press clears it all; the next press masks the whole node. Unmasking a child under a masked group automatically splits the group mask so only that child comes back. This works across views: mask a turn in session view, unmask one item from general view, and only that item returns.
-  - Masking a **pair row** stubs the result but keeps the call visible; masking a **turn** removes the whole section (calls and results drop together, safely).
+- `space` masks/unmasks the selected node — a group, a turn, a pair, or a single item. If anything under the node is masked, the first press unmasks it all; the next press masks the whole node. Unmasking a child under a masked group brings back only that child, and masks set in one view can be undone from the other.
+  - Masking a **pair row** stubs the result but keeps the call visible; masking a **turn** removes the whole section, calls and results together.
 - `tab` switches the token column between **raw** (what the history costs unmasked) and **effective** (what will actually be sent after masking).
-- `p` opens the preset menu. Presets with a ‹value› are tunable with `←`/`→` before applying, and tuned values persist with the session. Presets are one-shot batches (a batch breaks the prompt cache once; a live rule would break it every turn) and mask individual leaves, so newer results stay visible and anything can be unmasked by hand.
+- `p` opens the preset menu. Presets with a ‹value› are tunable with `←`/`→` before applying, and tuned values persist with the session. Presets apply once as a batch and mask individual items, so newer results stay visible and anything can be unmasked by hand.
 
   ```
   1. Hide tool results older than ‹2› turns  ←→
@@ -57,19 +57,11 @@ Run `/ctx` (or `ctrl+alt+c`) to open the panel:
   5. Clear all masks
   ```
 
-- The panel is **cache-aware**. Prompt caching is prefix-based: the provider caches the prompt exactly as sent on the last call, and any edit — masking *or* unmasking — rewrites everything after the edit point once (~1.25x base price) before the smaller prompt reads cheap again (~0.1x). Masking near the tail is nearly free; masking early content pays a large one-time rewrite for a small per-call saving. The panel prices this so you never guess:
-  - the footer previews the selected node before you press space: `mask: saves ~1.2K/call · rewrites ~8.0K cached · pays off in ~16 calls` (or `unmask: adds ~… back`, or `saves nothing · … — not worth it` when a tiny result's stub costs as much as the content it hides);
-  - changes since the last call show a pending line — batched masks break the cache **once**, at the earliest change: `⚡ pending: cache breaks at turn 3 · ~8.0K rewritten next call (45.2K cached now)`. The cached size is the provider's real usage number (`input + cacheRead + cacheWrite`), not an estimate;
-  - the session view draws the break point in place, since chronological order *is* cache order:
-
-    ```
-    ├─ ○ user · run ls with bash, then reply with just: done
-    ┄┄ cache breaks here · everything below is rewritten next call ┄┄┄┄┄┄
-    ├─ ● bash · ls
-    ╰─ ○ assistant · done
-    ```
-  - while a break is pending, the below-editor widget warns `· next call rewrites ~8.0K cache` (even if you unmasked back to zero masks — restoring bytes breaks the cache too).
-- The panel renders **in flow** between the transcript and the input (not as an overlay covering content), and stacks vertically with above-editor widgets from other extensions. The editor keeps real focus the whole time — the panel claims the keyboard via an input listener.
+- The panel is **cache-aware**: prompt caching is prefix-based, so any change (mask or unmask) rewrites everything after it on the next call.
+  - The footer previews the selected node: `mask: saves ~1.2K/call · rewrites ~8.0K cached · pays off in ~16 calls`.
+  - Unapplied changes show a pending line — batched masks break the cache once, at the earliest change: `⚡ pending: cache breaks at turn 3 · ~8.0K rewritten next call (45.2K cached now)`. The cached size is the provider's real usage number.
+  - The session view draws a `┄┄ cache breaks here ┄┄` line at the break point, and the below-editor widget warns `next call rewrites ~8.0K cache` while a break is pending.
+- The panel renders **in flow** between the transcript and the input, stacking with widgets from other extensions.
 - `i` hands the keyboard back to the editor while the panel stays visible; `/ctx` or `ctrl+alt+c` grabs it back. `esc` closes the panel. `ctrl+c`/`ctrl+d` always pass through to pi.
 - Mask state persists in the session (as a `custom` entry pi never sends to the model) and is restored on `/resume`.
 

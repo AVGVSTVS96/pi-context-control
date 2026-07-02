@@ -38,6 +38,28 @@ export const leafId = {
 	meta: (m: AnyMessage) => `meta:${messageKey(m)}`,
 };
 
+/**
+ * Chronological group ids. A "turn" is the section starting at each user
+ * message (keyed by that message so ids stay stable as the session grows);
+ * a "pair" is one tool call + its result shown as a single row in the
+ * session view. Masking a pair covers only the result (stubbed in place),
+ * so the pair id appears in the result's chain but not the call's.
+ */
+export const TURN_PRE = "turn:pre";
+
+export function turnIdFor(userMessage: AnyMessage): string {
+	return `turn:${messageKey(userMessage)}`;
+}
+
+/** Walk helper: advance the current turn id when a user message starts a new one. */
+export function advanceTurn(current: string, m: AnyMessage): string {
+	return m.role === "user" ? turnIdFor(m) : current;
+}
+
+export function pairId(toolCallId: string): string {
+	return `pair:${toolCallId}`;
+}
+
 /** Group id constants (dotted hierarchy used by both tree and masking). */
 export const groups = {
 	assistant: "assistant",

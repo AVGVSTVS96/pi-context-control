@@ -1,0 +1,5 @@
+{
+	"presets": [
+		{ "label": "Trim heavy reads (>1 turn old)", "types": ["tool-result"], "tools": ["read"], "olderThanTurns": 1 }
+	]
+}

@@ -1,23 +1,19 @@
 /**
- * Context tree model: role → content-type → tool → individual messages,
- * with occurrence counts and raw/effective token estimates per node.
+ * The two tree models the panel can show, built from the same leaf index:
  *
- * "raw" is what the item costs as recorded; "effective" is what it will cost
- * after the current mask set is applied (0 when dropped, a small stub cost
- * when a tool result is stubbed).
+ *  - buildTree:        general view — role → content-type → tool → messages
+ *  - buildSessionTree: session view — turn → items in order, with each tool
+ *                      call and its result merged into one "pair" row
+ *
+ * "raw" is what an item costs as recorded; "effective" is what it will cost
+ * after the current mask set is applied (0 when dropped, the exact stub cost
+ * when a tool result is stubbed). Leaves carry their covering chain so mask
+ * toggling works identically from either view.
  */
 
-import {
-	estimateChars,
-	estimateContent,
-	estimateTextBlock,
-	estimateThinkingBlock,
-	estimateToolCallBlock,
-	IMAGE_TOKENS,
-} from "./estimate.ts";
-import { type AnyMessage, groups, leafId } from "./keys.ts";
-import { chains, maskedResultStub, type MaskState } from "./masking.ts";
-import { collectCallSummaries, firstLine, summarizeArgs, textOf } from "./summarize.ts";
+import { groups, pairId } from "./keys.ts";
+import type { LeafIndex, LeafInfo } from "./leaves.ts";
+import type { MaskState } from "./masking.ts";
 
 export interface TreeNode {
 	id: string;
@@ -29,10 +25,12 @@ export interface TreeNode {
 	children: TreeNode[];
 	parent: TreeNode | null;
 	isLeaf: boolean;
-	/** Own id masked directly (vs inherited from an ancestor). */
+	/** Own id masked directly (vs inherited/covered). */
 	selfMasked: boolean;
-	/** Effectively masked (self or any ancestor). */
+	/** Effectively masked (own id or anything covering it). */
 	masked: boolean;
+	/** Leaves: full covering chain for mask toggling. */
+	chain?: readonly string[];
 }
 
 export interface ContextTreeModel {
@@ -49,6 +47,10 @@ class TreeBuilder {
 
 	constructor(state: MaskState) {
 		this.state = state;
+	}
+
+	get(id: string): TreeNode | undefined {
+		return this.nodes.get(id);
 	}
 
 	group(id: string, label: string, parent: TreeNode | null): TreeNode {
@@ -72,210 +74,167 @@ class TreeBuilder {
 		return node;
 	}
 
-	leaf(parent: TreeNode, id: string, label: string, rawTokens: number, effectiveTokens: number): void {
-		const selfMasked = this.state.has(id);
-		const masked = selfMasked || parent.masked;
+	leaf(parent: TreeNode, leaf: LeafInfo, effective: number, label?: string): void {
 		const node: TreeNode = {
-			id,
-			label,
+			id: leaf.id,
+			label: label ?? leaf.label,
 			count: 1,
-			rawTokens,
-			effectiveTokens,
+			rawTokens: leaf.raw,
+			effectiveTokens: effective,
 			children: [],
 			parent,
 			isLeaf: true,
-			selfMasked,
-			masked,
+			selfMasked: this.state.has(leaf.id),
+			masked: this.state.anyMasked(leaf.chain),
+			chain: leaf.chain,
 		};
 		parent.children.push(node);
 		// Propagate tokens and counts up the group chain.
 		for (let p: TreeNode | null = parent; p; p = p.parent) {
 			p.count += 1;
-			p.rawTokens += rawTokens;
-			p.effectiveTokens += effectiveTokens;
+			p.rawTokens += leaf.raw;
+			p.effectiveTokens += effective;
 		}
+	}
+
+	finish(messageCount: number): ContextTreeModel {
+		const roots = this.roots.filter((r) => r.count > 0 || r.children.length > 0);
+		return {
+			roots,
+			messageCount,
+			rawTotal: roots.reduce((sum, r) => sum + r.rawTokens, 0),
+			effectiveTotal: roots.reduce((sum, r) => sum + r.effectiveTokens, 0),
+		};
 	}
 }
 
-export function buildTree(messages: AnyMessage[], state: MaskState): ContextTreeModel {
-	const b = new TreeBuilder(state);
-	const callSummaries = collectCallSummaries(messages);
-
-	// Precompute tool calls dropped by call-masking: their paired results are
-	// dropped entirely rather than stubbed, and assistant counts need them.
-	const droppedCalls = new Set<string>();
-	for (const m of messages) {
-		if (m.role !== "assistant" || !Array.isArray(m.content)) continue;
-		for (const block of m.content) {
-			if (block?.type === "toolCall" && block.id) {
-				if (state.anyMasked(chains.toolCall(block.name ?? "unknown", block.id))) {
-					droppedCalls.add(block.id);
-				}
-			}
+/** Tool calls masked away entirely; their paired results are dropped, not stubbed. */
+function droppedCallIds(idx: LeafIndex, state: MaskState): Set<string> {
+	const dropped = new Set<string>();
+	for (const leaf of idx.leaves) {
+		if (leaf.kind === "tool-call" && leaf.toolCallId && state.anyMasked(leaf.chain)) {
+			dropped.add(leaf.toolCallId);
 		}
 	}
+	return dropped;
+}
+
+function leafEffective(leaf: LeafInfo, state: MaskState, droppedCalls: Set<string>): number {
+	if (leaf.kind === "tool-result") {
+		if (leaf.toolCallId && droppedCalls.has(leaf.toolCallId)) return 0;
+		if (state.anyMasked(leaf.chain)) return Math.min(leaf.raw, leaf.stubTokens ?? 0);
+		return leaf.raw;
+	}
+	return state.anyMasked(leaf.chain) ? 0 : leaf.raw;
+}
+
+/** General view: role → content-type → tool. */
+export function buildTree(idx: LeafIndex, state: MaskState): ContextTreeModel {
+	const b = new TreeBuilder(state);
+	const droppedCalls = droppedCallIds(idx, state);
 
 	const assistant = b.group(groups.assistant, "assistant", null);
 	const user = b.group(groups.user, "user", null);
 	const tool = b.group(groups.tool, "tool", null);
-	let meta: TreeNode | null = null;
 
-	let assistantMessages = 0;
-	let userMessages = 0;
-	let toolMessages = 0;
-
-	for (const m of messages) {
-		switch (m.role) {
-			case "assistant": {
-				assistantMessages++;
-				const content = Array.isArray(m.content) ? m.content : [];
-				for (const block of content) {
-					if (!block || typeof block !== "object") continue;
-					if (block.type === "text") {
-						const raw = estimateTextBlock(block);
-						const masked = state.anyMasked(chains.assistantText(m));
-						b.leaf(
-							b.group(groups.assistantText, "text", assistant),
-							leafId.assistantText(m),
-							firstLine(block.text ?? ""),
-							raw,
-							masked ? 0 : raw,
-						);
-					} else if (block.type === "thinking") {
-						const raw = estimateThinkingBlock(block);
-						const masked = state.anyMasked(chains.reasoning(m));
-						b.leaf(
-							b.group(groups.reasoning, "reasoning", assistant),
-							leafId.reasoning(m),
-							firstLine(block.thinking ?? ""),
-							raw,
-							masked ? 0 : raw,
-						);
-					} else if (block.type === "toolCall") {
-						const name = block.name ?? "unknown";
-						const raw = estimateToolCallBlock(block);
-						const masked = block.id ? droppedCalls.has(block.id) : false;
-						const callGroup = b.group(groups.toolCall, "tool-call", assistant);
-						b.leaf(
-							b.group(groups.toolCallFor(name), name, callGroup),
-							leafId.toolCall(block.id ?? ""),
-							summarizeArgs(block.arguments),
-							raw,
-							masked ? 0 : raw,
-						);
-					}
-				}
+	for (const leaf of idx.leaves) {
+		const effective = leafEffective(leaf, state, droppedCalls);
+		switch (leaf.kind) {
+			case "assistant-text":
+				b.leaf(b.group(groups.assistantText, "text", assistant), leaf, effective);
+				break;
+			case "reasoning":
+				b.leaf(b.group(groups.reasoning, "reasoning", assistant), leaf, effective);
+				break;
+			case "tool-call": {
+				const callGroup = b.group(groups.toolCall, "tool-call", assistant);
+				b.leaf(b.group(groups.toolCallFor(leaf.tool ?? "unknown"), leaf.tool ?? "unknown", callGroup), leaf, effective);
 				break;
 			}
-			case "user": {
-				userMessages++;
-				const content = m.content;
-				const textMasked = state.anyMasked(chains.userText(m));
-				const imageMasked = state.anyMasked(chains.userImage(m));
-				if (typeof content === "string") {
-					const raw = estimateContent(content);
-					b.leaf(
-						b.group(groups.userText, "text", user),
-						leafId.userText(m),
-						firstLine(content),
-						raw,
-						textMasked ? 0 : raw,
-					);
-				} else if (Array.isArray(content)) {
-					let textRaw = 0;
-					let imageCount = 0;
-					let label = "";
-					for (const block of content) {
-						if (block?.type === "text") {
-							textRaw += estimateTextBlock(block);
-							if (!label) label = firstLine(block.text ?? "");
-						} else if (block?.type === "image") {
-							imageCount++;
-						}
-					}
-					if (textRaw > 0 || imageCount === 0) {
-						b.leaf(
-							b.group(groups.userText, "text", user),
-							leafId.userText(m),
-							label,
-							textRaw,
-							textMasked ? 0 : textRaw,
-						);
-					}
-					if (imageCount > 0) {
-						const raw = imageCount * IMAGE_TOKENS;
-						b.leaf(
-							b.group(groups.userImage, "image", user),
-							leafId.userImage(m),
-							imageCount === 1 ? "image" : `${imageCount} images`,
-							raw,
-							imageMasked ? 0 : raw,
-						);
-					}
-				}
+			case "user-text":
+				b.leaf(b.group(groups.userText, "text", user), leaf, effective);
 				break;
-			}
-			case "toolResult": {
-				toolMessages++;
-				const name = m.toolName ?? "unknown";
-				const raw = estimateContent(m.content);
-				const dropped = m.toolCallId ? droppedCalls.has(m.toolCallId) : false;
-				const masked = state.anyMasked(chains.toolResult(m));
-				const stubTokens = masked
-					? estimateChars(maskedResultStub(m, m.toolCallId ? callSummaries.get(m.toolCallId) : undefined))
-					: 0;
-				const effective = dropped ? 0 : masked ? Math.min(raw, stubTokens) : raw;
+			case "user-image":
+				b.leaf(b.group(groups.userImage, "image", user), leaf, effective);
+				break;
+			case "tool-result": {
 				const resultGroup = b.group(groups.toolResult, "tool-result", tool);
-				const label = typeof m.content === "string" ? firstLine(m.content) : firstLine(textOf(m.content));
-				b.leaf(b.group(groups.toolResultFor(name), name, resultGroup), leafId.toolResult(m.toolCallId ?? ""), label, raw, effective);
+				b.leaf(
+					b.group(groups.toolResultFor(leaf.tool ?? "unknown"), leaf.tool ?? "unknown", resultGroup),
+					leaf,
+					effective,
+				);
 				break;
 			}
-			case "custom":
-			case "bashExecution":
-			case "branchSummary":
-			case "compactionSummary": {
-				meta ??= b.group(groups.meta, "meta", null);
-				const raw = estimateMeta(m);
-				const masked = state.anyMasked(chains.meta(m));
-				b.leaf(b.group(groups.metaFor(m.role), m.role, meta), leafId.meta(m), metaLabel(m), raw, masked ? 0 : raw);
+			case "meta": {
+				const meta = b.group(groups.meta, "meta", null);
+				const role = leaf.metaRole ?? "meta";
+				b.leaf(b.group(groups.metaFor(role), role, meta), leaf, effective);
 				break;
 			}
 		}
 	}
 
-	// Group counts show occurrences; top-level role groups show message counts
-	// (matching the reference UI where "assistant 330x" is messages while
-	// "tool-call 179x" is blocks).
-	assistant.count = assistantMessages;
-	user.count = userMessages;
-	tool.count = toolMessages;
+	// Top-level role groups show message counts (matching the reference UI
+	// where "assistant 330x" is messages while "tool-call 179x" is blocks).
+	assistant.count = idx.roleCounts.assistant;
+	user.count = idx.roleCounts.user;
+	tool.count = idx.roleCounts.tool;
 
 	// Largest-first ordering inside tool-call / tool-result groupings.
 	for (const id of [groups.toolCall, groups.toolResult]) {
-		const node = b.roots.flatMap((r) => r.children).find((c) => c.id === id);
-		node?.children.sort((a, z) => z.rawTokens - a.rawTokens);
+		b.get(id)?.children.sort((a, z) => z.rawTokens - a.rawTokens);
 	}
 
-	const roots = b.roots.filter((r) => r.count > 0 || r.children.length > 0);
-	const rawTotal = roots.reduce((sum, r) => sum + r.rawTokens, 0);
-	const effectiveTotal = roots.reduce((sum, r) => sum + r.effectiveTokens, 0);
-	return { roots, messageCount: messages.length, rawTotal, effectiveTotal };
+	return b.finish(idx.messageCount);
 }
 
-function estimateMeta(m: AnyMessage): number {
-	if (m.role === "bashExecution") {
-		return Math.ceil(((String((m as any).command ?? "") + String((m as any).output ?? "")).length) / 4);
-	}
-	if (m.role === "branchSummary" || m.role === "compactionSummary") {
-		return Math.ceil(String((m as any).summary ?? "").length / 4);
-	}
-	return estimateContent(m.content);
-}
+/** Session view: turn → items in chronological order, call+result paired. */
+export function buildSessionTree(idx: LeafIndex, state: MaskState): ContextTreeModel {
+	const b = new TreeBuilder(state);
+	const droppedCalls = droppedCallIds(idx, state);
+	const turnLabels = new Map(idx.turns.map((t, i) => [t.id, `turn ${i + 1} · ${t.label}`]));
 
-function metaLabel(m: AnyMessage): string {
-	if (m.role === "bashExecution") return firstLine(String((m as any).command ?? ""));
-	if (m.role === "custom") return String((m as any).customType ?? "custom");
-	if (m.role === "branchSummary") return "branch summary";
-	if (m.role === "compactionSummary") return "compaction summary";
-	return m.role;
+	for (const leaf of idx.leaves) {
+		const effective = leafEffective(leaf, state, droppedCalls);
+		const turn = b.group(leaf.turnId, turnLabels.get(leaf.turnId) ?? leaf.turnId, null);
+		switch (leaf.kind) {
+			case "user-text":
+				b.leaf(turn, leaf, effective, `user · ${leaf.label}`);
+				break;
+			case "user-image":
+				b.leaf(turn, leaf, effective, `user · ${leaf.label}`);
+				break;
+			case "assistant-text":
+				b.leaf(turn, leaf, effective, `text · ${leaf.label}`);
+				break;
+			case "reasoning":
+				b.leaf(turn, leaf, effective, `reasoning · ${leaf.label}`);
+				break;
+			case "tool-call": {
+				const pair = b.group(pairId(leaf.toolCallId ?? ""), `${leaf.tool} · ${leaf.label}`, turn);
+				b.leaf(pair, leaf, effective, "call");
+				break;
+			}
+			case "tool-result": {
+				const pair = b.group(pairId(leaf.toolCallId ?? ""), `${leaf.tool} · result`, turn);
+				b.leaf(pair, leaf, effective, `result · ${leaf.label}`);
+				break;
+			}
+			case "meta":
+				b.leaf(turn, leaf, effective, `${leaf.metaRole} · ${leaf.label}`);
+				break;
+		}
+	}
+
+	// Turn rows count messages; pair rows are one exchange, not two blocks.
+	const turnCounts = new Map(idx.turns.map((t) => [t.id, t.messageCount]));
+	for (const turn of b.roots) {
+		turn.count = turnCounts.get(turn.id) ?? turn.count;
+		for (const child of turn.children) {
+			if (!child.isLeaf) child.count = 1;
+		}
+	}
+
+	return b.finish(idx.messageCount);
 }

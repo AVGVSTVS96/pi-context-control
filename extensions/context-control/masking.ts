@@ -6,15 +6,22 @@
  * a filtered/rewritten array. Unmasking simply stops filtering on the next
  * LLM call.
  *
+ * Every maskable leaf is covered by a chain of group ids from two hierarchies
+ * at once: its type ancestors (assistant → reasoning, tool → tool-result →
+ * read) and its chronological ancestors (the turn it happened in, and for a
+ * tool result the call/result pair row). A mask on any id in the chain hides
+ * the leaf, which is what lets the general view and the session view drive
+ * the same state.
+ *
  * Pairing safety: providers require toolCall/toolResult pairing, so
- *  - masking a tool RESULT replaces its content with a short stub (the call
- *    and pairing stay intact);
+ *  - masking a tool RESULT (or its pair row) replaces its content with a
+ *    short stub (the call and pairing stay intact);
  *  - masking a tool CALL removes the call block AND drops its paired result
  *    message entirely.
  */
 
 import { estimateContent, formatCompact } from "./estimate.ts";
-import { type AnyMessage, groups, leafId } from "./keys.ts";
+import { advanceTurn, type AnyMessage, groups, leafId, pairId, TURN_PRE } from "./keys.ts";
 import { collectCallSummaries, firstLine, textOf } from "./summarize.ts";
 
 export class MaskState {
@@ -24,7 +31,7 @@ export class MaskState {
 		return this.masked.has(id);
 	}
 
-	/** Effective mask: the node itself or any ancestor group is masked. */
+	/** Effective mask: any id in the leaf's covering chain is masked. */
 	anyMasked(chain: readonly string[]): boolean {
 		for (const id of chain) if (this.masked.has(id)) return true;
 		return false;
@@ -51,44 +58,74 @@ export class MaskState {
 	}
 }
 
-/** Aspect chains — shared vocabulary between the tree model and the transform. */
+/**
+ * Covering chains — shared vocabulary between the leaf index, the trees, and
+ * the transform. Ordered outermost group → leaf id (own id included last).
+ * The pair id covers only the RESULT: masking a pair row stubs the result
+ * but keeps the call, so the exchange stays visible to the model.
+ */
 export const chains = {
-	assistantText: (m: AnyMessage) => [groups.assistant, groups.assistantText, leafId.assistantText(m)],
-	reasoning: (m: AnyMessage) => [groups.assistant, groups.reasoning, leafId.reasoning(m)],
-	toolCall: (tool: string, id: string) => [
+	assistantText: (m: AnyMessage, turnId: string) => [
+		groups.assistant,
+		groups.assistantText,
+		turnId,
+		leafId.assistantText(m),
+	],
+	reasoning: (m: AnyMessage, turnId: string) => [groups.assistant, groups.reasoning, turnId, leafId.reasoning(m)],
+	toolCall: (tool: string, id: string, turnId: string) => [
 		groups.assistant,
 		groups.toolCall,
 		groups.toolCallFor(tool),
+		turnId,
 		leafId.toolCall(id),
 	],
-	toolResult: (m: AnyMessage) => [
+	toolResult: (m: AnyMessage, turnId: string) => [
 		groups.tool,
 		groups.toolResult,
 		groups.toolResultFor(m.toolName ?? "unknown"),
+		turnId,
+		pairId(m.toolCallId ?? ""),
 		leafId.toolResult(m.toolCallId ?? ""),
 	],
-	userText: (m: AnyMessage) => [groups.user, groups.userText, leafId.userText(m)],
-	userImage: (m: AnyMessage) => [groups.user, groups.userImage, leafId.userImage(m)],
-	meta: (m: AnyMessage) => [groups.meta, groups.metaFor(m.role), leafId.meta(m)],
+	userText: (m: AnyMessage, turnId: string) => [groups.user, groups.userText, turnId, leafId.userText(m)],
+	userImage: (m: AnyMessage, turnId: string) => [groups.user, groups.userImage, turnId, leafId.userImage(m)],
+	meta: (m: AnyMessage, turnId: string) => [groups.meta, groups.metaFor(m.role), turnId, leafId.meta(m)],
 };
 
 /** Minimal structural view of a tree node used for mask toggling. */
 export interface MaskableNode {
 	id: string;
-	parent: MaskableNode | null;
-	children: MaskableNode[];
-	selfMasked: boolean;
+	isLeaf: boolean;
 	masked: boolean;
+	children: MaskableNode[];
+	/** Leaves carry their full covering chain (own id included). */
+	chain?: readonly string[];
+}
+
+/** Leaf reference for explode: id + covering chain. */
+export interface LeafRef {
+	id: string;
+	chain: readonly string[];
+}
+
+function collectLeafRefs(node: MaskableNode, out: LeafRef[] = []): LeafRef[] {
+	if (node.isLeaf) {
+		out.push({ id: node.id, chain: node.chain ?? [node.id] });
+		return out;
+	}
+	for (const child of node.children) collectLeafRefs(child, out);
+	return out;
 }
 
 /**
- * Toggle a node's mask. Unmasking a node whose mask is inherited from an
- * ancestor "explodes" that ancestor: the ancestor's mask is removed and every
- * sibling subtree that was covered by it gets its own mask, so only the
- * requested node becomes visible again.
+ * Toggle a node's mask. Unmasking a node hidden by a group mask "explodes"
+ * that mask at leaf granularity: the group id is removed and every OTHER
+ * leaf it covered gets its own mask, so only the requested node comes back.
+ * Because coverage is chain-based, this works no matter which view created
+ * the group mask (a type group, a turn, or a pair row).
  */
-export function toggleNodeMask(state: MaskState, node: MaskableNode): void {
-	if (node.selfMasked) {
+export function toggleNodeMask(state: MaskState, node: MaskableNode, allLeaves: readonly LeafRef[]): void {
+	if (state.has(node.id)) {
 		state.remove(node.id);
 		return;
 	}
@@ -96,22 +133,24 @@ export function toggleNodeMask(state: MaskState, node: MaskableNode): void {
 		state.add(node.id);
 		return;
 	}
-	// Inherited mask: explode each self-masked ancestor, nearest first.
-	for (;;) {
-		const path: MaskableNode[] = [node];
-		let ancestor = node.parent;
-		while (ancestor && !state.has(ancestor.id)) {
-			path.push(ancestor);
-			ancestor = ancestor.parent;
+	const targets = collectLeafRefs(node);
+	const targetIds = new Set(targets.map((t) => t.id));
+	// Each pass removes at least one covering id and never re-adds one, so
+	// this terminates; the guard is belt-and-suspenders.
+	for (let guard = 0; guard < 1000; guard++) {
+		const covering = new Set<string>();
+		for (const t of targets) {
+			if (state.has(t.id)) state.remove(t.id);
+			for (const gid of t.chain) {
+				if (gid !== t.id && state.has(gid)) covering.add(gid);
+			}
 		}
-		if (!ancestor) return;
-		path.push(ancestor);
-		path.reverse(); // [maskedAncestor, ..., node]
-		state.remove(ancestor.id);
-		for (let i = 0; i < path.length - 1; i++) {
-			const keep = path[i + 1];
-			for (const child of path[i].children) {
-				if (child !== keep) state.add(child.id);
+		if (covering.size === 0) return;
+		for (const gid of covering) {
+			state.remove(gid);
+			for (const leaf of allLeaves) {
+				if (targetIds.has(leaf.id)) continue;
+				if (leaf.chain.includes(gid)) state.add(leaf.id);
 			}
 		}
 	}
@@ -142,17 +181,19 @@ export function applyMask(messages: AnyMessage[], state: MaskState): AnyMessage[
 	const callSummaries = collectCallSummaries(messages);
 	const droppedCalls = new Set<string>();
 	const out: AnyMessage[] = [];
+	let turnId = TURN_PRE;
 
 	for (const m of messages) {
+		turnId = advanceTurn(turnId, m);
 		switch (m.role) {
 			case "assistant": {
-				const transformed = transformAssistant(m, state, droppedCalls);
+				const transformed = transformAssistant(m, state, droppedCalls, turnId);
 				if (transformed) out.push(transformed);
 				break;
 			}
 			case "toolResult": {
 				if (m.toolCallId && droppedCalls.has(m.toolCallId)) break;
-				if (state.anyMasked(chains.toolResult(m))) {
+				if (state.anyMasked(chains.toolResult(m, turnId))) {
 					const stub = maskedResultStub(m, m.toolCallId ? callSummaries.get(m.toolCallId) : undefined);
 					out.push({ ...m, content: [{ type: "text", text: stub }], details: undefined });
 				} else {
@@ -161,7 +202,7 @@ export function applyMask(messages: AnyMessage[], state: MaskState): AnyMessage[
 				break;
 			}
 			case "user": {
-				const transformed = transformUser(m, state);
+				const transformed = transformUser(m, state, turnId);
 				if (transformed) out.push(transformed);
 				break;
 			}
@@ -169,7 +210,7 @@ export function applyMask(messages: AnyMessage[], state: MaskState): AnyMessage[
 			case "bashExecution":
 			case "branchSummary":
 			case "compactionSummary": {
-				if (!state.anyMasked(chains.meta(m))) out.push(m);
+				if (!state.anyMasked(chains.meta(m, turnId))) out.push(m);
 				break;
 			}
 			default:
@@ -179,7 +220,12 @@ export function applyMask(messages: AnyMessage[], state: MaskState): AnyMessage[
 	return out;
 }
 
-function transformAssistant(m: AnyMessage, state: MaskState, droppedCalls: Set<string>): AnyMessage | null {
+function transformAssistant(
+	m: AnyMessage,
+	state: MaskState,
+	droppedCalls: Set<string>,
+	turnId: string,
+): AnyMessage | null {
 	const content = Array.isArray(m.content) ? m.content : [];
 	let changed = false;
 	const kept: unknown[] = [];
@@ -189,16 +235,16 @@ function transformAssistant(m: AnyMessage, state: MaskState, droppedCalls: Set<s
 			kept.push(block);
 			continue;
 		}
-		if (block.type === "text" && state.anyMasked(chains.assistantText(m))) {
+		if (block.type === "text" && state.anyMasked(chains.assistantText(m, turnId))) {
 			changed = true;
 			continue;
 		}
-		if (block.type === "thinking" && state.anyMasked(chains.reasoning(m))) {
+		if (block.type === "thinking" && state.anyMasked(chains.reasoning(m, turnId))) {
 			changed = true;
 			continue;
 		}
 		if (block.type === "toolCall") {
-			const chain = chains.toolCall(block.name ?? "unknown", block.id ?? "");
+			const chain = chains.toolCall(block.name ?? "unknown", block.id ?? "", turnId);
 			if (state.anyMasked(chain)) {
 				if (block.id) droppedCalls.add(block.id);
 				changed = true;
@@ -213,9 +259,9 @@ function transformAssistant(m: AnyMessage, state: MaskState, droppedCalls: Set<s
 	return { ...m, content: kept };
 }
 
-function transformUser(m: AnyMessage, state: MaskState): AnyMessage | null {
-	const textMasked = state.anyMasked(chains.userText(m));
-	const imageMasked = state.anyMasked(chains.userImage(m));
+function transformUser(m: AnyMessage, state: MaskState, turnId: string): AnyMessage | null {
+	const textMasked = state.anyMasked(chains.userText(m, turnId));
+	const imageMasked = state.anyMasked(chains.userImage(m, turnId));
 	if (!textMasked && !imageMasked) return m;
 
 	if (typeof m.content === "string") {

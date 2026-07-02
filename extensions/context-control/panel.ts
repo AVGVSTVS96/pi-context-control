@@ -150,10 +150,16 @@ export class ContextPanel implements Focusable {
 	handleInput(data: string): void {
 		if (this.presetMode) {
 			this.handlePresetInput(data);
+			this.tui.requestRender();
 			return;
 		}
+		this.handleTreeInput(data);
+		this.tui.requestRender();
+	}
+
+	private handleTreeInput(data: string): void {
 		const row = this.rows[this.selected[this.view]];
-		if (matchesKey(data, "escape") || data === "q") {
+		if (matchesKey(data, "escape") || data === "q" || matchesKey(data, "ctrl+alt+c")) {
 			this.callbacks.onClose();
 			return;
 		}
@@ -285,9 +291,11 @@ export class ContextPanel implements Focusable {
 			boxRow(
 				th.fg(
 					"dim",
-					this.presetMode
-						? "↑↓ move · ←→ adjust ‹value› · <enter> apply · <1-9> quick apply · <esc> back"
-						: "↑↓ move · ←→ fold · <space> mask · <tab> raw/eff · <v> view · <p> presets · <i> input · <esc> close",
+					!this.focused
+						? "typing in editor — /ctx or ctrl+alt+c to control the panel"
+						: this.presetMode
+							? "↑↓ move · ←→ adjust ‹value› · <enter> apply · <1-9> quick apply · <esc> back"
+							: "↑↓ move · ←→ fold · <space> mask · <tab> raw/eff · <v> view · <p> presets · <i> input · <esc> close",
 				),
 			),
 		);
@@ -374,10 +382,15 @@ export class ContextPanel implements Focusable {
 		const lineW = visibleWidth(line);
 		line += " ".repeat(Math.max(0, innerW - lineW));
 
-		if (isSelected) {
+		if (isSelected && this.focused) {
 			line = th.bg("selectedBg", line);
 		}
 		return th.fg("border", "│") + line + th.fg("border", "│");
+	}
+
+	/** Ask the TUI for a repaint (used when focus state changes from outside). */
+	redraw(): void {
+		this.tui.requestRender();
 	}
 
 	invalidate(): void {}

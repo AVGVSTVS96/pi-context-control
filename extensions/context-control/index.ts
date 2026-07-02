@@ -18,7 +18,7 @@ import {
 	type ExtensionContext,
 	type Theme,
 } from "@earendil-works/pi-coding-agent";
-import { Key, type OverlayHandle } from "@earendil-works/pi-tui";
+import { Key, matchesKey } from "@earendil-works/pi-tui";
 import { formatCompact } from "./estimate.ts";
 import type { AnyMessage } from "./keys.ts";
 import { indexLeaves, type LeafIndex, maskedLeafCount, pruneStaleMasks } from "./leaves.ts";
@@ -28,6 +28,7 @@ import { type Preset, PRESETS, toPreset, type UserPresetConfig } from "./presets
 import { buildSessionTree, buildTree, type ContextTreeModel } from "./tree.ts";
 
 const CUSTOM_TYPE = "context-control";
+const PANEL_KEY = "context-control:panel";
 
 interface PersistedState {
 	masked?: string[];
@@ -56,7 +57,7 @@ export default function contextControl(pi: ExtensionAPI): void {
 	let presetValues: Record<string, number> = {};
 	let allPresets: Preset[] = PRESETS;
 	let panel: ContextPanel | undefined;
-	let handle: OverlayHandle | undefined;
+	let panelFocused = false;
 	let closePanel: (() => void) | undefined;
 
 	function contextIndex(ctx: ExtensionContext): LeafIndex {
@@ -141,59 +142,71 @@ export default function contextControl(pi: ExtensionAPI): void {
 	pi.on("turn_end", async (_event, ctx) => refresh(ctx));
 	pi.on("agent_end", async (_event, ctx) => refresh(ctx));
 
+	/** Give or take the panel's claim on the keyboard (the editor keeps real focus). */
+	function setPanelFocus(focused: boolean): void {
+		panelFocused = focused;
+		if (panel) panel.focused = focused;
+	}
+
 	async function openPanel(ctx: ExtensionContext): Promise<void> {
 		if (ctx.mode !== "tui") {
 			ctx.ui.notify("context-control needs the interactive TUI", "warning");
 			return;
 		}
-		// Already open (possibly unfocused while typing): bring it back.
-		if (panel && handle) {
-			handle.setHidden(false);
-			handle.focus();
+		// Already open (possibly unfocused while typing): take the keys back.
+		if (panel) {
+			setPanelFocus(true);
+			panel.redraw();
 			return;
 		}
 
-		void ctx.ui
-			.custom<void>(
-				(tui, theme, _keybindings, done) => {
-					closePanel = () => done(undefined);
-					panel = new ContextPanel(tui, theme, buildModels(contextIndex(ctx)), allPresets, presetValues, {
-						onToggleMask: (node) => {
-							toggleNodeMask(state, node, contextIndex(ctx).leaves);
-							persist();
-							refresh(ctx);
-						},
-						onPreset: (preset, value) => {
-							if (preset.apply(state, contextIndex(ctx), value) > 0) persist();
-							refresh(ctx);
-						},
-						onPresetValues: (values) => {
-							presetValues = values;
-							persist();
-						},
-						onClose: () => done(undefined),
-						onUnfocus: () => handle?.unfocus(),
-					});
-					return panel;
-				},
-				{
-					overlay: true,
-					overlayOptions: {
-						width: "100%",
-						maxHeight: "80%",
-						anchor: "bottom-center",
-						margin: { bottom: 6, left: 1, right: 1 },
+		// The panel lives in flow between the transcript and the editor, as an
+		// above-editor widget. It stacks vertically with widgets from other
+		// extensions (each key gets its own slot, insertion order top-down).
+		ctx.ui.setWidget(
+			PANEL_KEY,
+			(tui, theme) => {
+				panel = new ContextPanel(tui, theme, buildModels(contextIndex(ctx)), allPresets, presetValues, {
+					onToggleMask: (node) => {
+						toggleNodeMask(state, node, contextIndex(ctx).leaves);
+						persist();
+						refresh(ctx);
 					},
-					onHandle: (h) => {
-						handle = h;
+					onPreset: (preset, value) => {
+						if (preset.apply(state, contextIndex(ctx), value) > 0) persist();
+						refresh(ctx);
 					},
-				},
-			)
-			.then(() => {
-				panel = undefined;
-				handle = undefined;
-				closePanel = undefined;
-			});
+					onPresetValues: (values) => {
+						presetValues = values;
+						persist();
+					},
+					onClose: () => closePanel?.(),
+					onUnfocus: () => setPanelFocus(false),
+				});
+				panel.focused = true;
+				return panel;
+			},
+			{ placement: "aboveEditor" },
+		);
+		panelFocused = true;
+
+		// The editor keeps real focus; this listener runs first in the TUI's
+		// input chain and feeds the panel while it claims the keyboard.
+		const unsubscribe = ctx.ui.onTerminalInput((data) => {
+			if (!panel || !panelFocused) return undefined;
+			// Never swallow pi's interrupt/quit chords.
+			if (matchesKey(data, "ctrl+c") || matchesKey(data, "ctrl+d")) return undefined;
+			panel.handleInput(data);
+			return { consume: true };
+		});
+
+		closePanel = () => {
+			unsubscribe();
+			panel = undefined;
+			panelFocused = false;
+			closePanel = undefined;
+			ctx.ui.setWidget(PANEL_KEY, undefined);
+		};
 	}
 
 	pi.registerCommand("ctx", {

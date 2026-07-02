@@ -57,7 +57,8 @@ Run `/ctx` (or `ctrl+alt+c`) to open the panel:
   5. Clear all masks
   ```
 
-- `i` returns focus to the editor while the panel stays open above the input; `/ctx` focuses it again. `esc` closes it.
+- The panel renders **in flow** between the transcript and the input (not as an overlay covering content), and stacks vertically with above-editor widgets from other extensions. The editor keeps real focus the whole time — the panel claims the keyboard via an input listener.
+- `i` hands the keyboard back to the editor while the panel stays visible; `/ctx` or `ctrl+alt+c` grabs it back. `esc` closes the panel. `ctrl+c`/`ctrl+d` always pass through to pi.
 - Mask state persists in the session (as a `custom` entry pi never sends to the model) and is restored on `/resume`.
 
 ### Custom presets

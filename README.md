@@ -11,15 +11,15 @@ Run `/ctx` (or `ctrl+alt+c`) to open the panel:
 ```
 ╭──────────────────────────────────────────────────────────────────────╮
 │ Context Token Usage (effective)                                      │
-│ messages: 21 · tokens: 16.5K raw · 10.5K masked out · 6.0K effective │
+│ messages: 21 · tokens: 16.5K raw · 10.5K masked out (12 items) · …   │
 │ ↑↓ move · ←→ fold · <space> mask/unmask · <tab> raw/effective · …    │
 │ ──────────────────────────────────────────────────────────────────── │
 │ ○ assistant                                    7x       5_556 tokens │
-│ ├─ ● reasoning                                 6x       5_304 tokens │
-│ ├─ ● text                                      7x          90 tokens │
+│ ├─ ○ reasoning                                 6x       5_304 tokens │
+│ ├─ ○ text                                      7x          90 tokens │
 │ ╰─ ○ tool-call                                12x         162 tokens │
-│    ├─ ● bash                                   6x          96 tokens │
-│    ╰─ ● read                                   6x          66 tokens │
+│    ├─ ○ bash                                   6x          96 tokens │
+│    ╰─ ○ read                                   6x          66 tokens │
 │ ○ user                                         2x          28 tokens │
 │ ✕ tool                                        12x         420 tokens │
 │ ╰─ ✕ tool-result                              12x         420 tokens │
@@ -31,7 +31,7 @@ Run `/ctx` (or `ctrl+alt+c`) to open the panel:
   - **session view** — turn → items in chronological order ("when it happened"). A turn is the section starting at each user message. Each tool call and its result appear as one pair row (`read · /src/config/loader.ts`), expandable into call and result. A **collapsed** turn still shows its final assistant reply, elbowed off the turn's marker, so every turn reads as question → answer at a glance:
 
   ```
-  ● turn 1 · Please look at the config loader and fix…     20x  14_841 tokens
+  ○ turn 1 · Please look at the config loader and fix…     20x  14_841 tokens
   ╰─ ○ assistant · Found it: parseEnv drops empty-str…       1x      24 tokens
   ◐ turn 2 · Great — write a regression test for that…       6x   1_204 tokens
   ├─ ○ user · Great — write a regression test for that…      1x      11 tokens
@@ -42,7 +42,7 @@ Run `/ctx` (or `ctrl+alt+c`) to open the panel:
   ╰─ ○ assistant · Added tests/config-loader.test.ts…        1x      17 tokens
   ```
 
-- Circle markers carry both fold and mask state: **●** collapsed (content folded inside, `→` to open) · **○** fully shown · **◐** partially masked · **✕** masked out.
+- Circle markers show **mask state only**: **○** in context · **◐** partially masked · **✕** masked out. Fold state lives in the tree lines: the connector touching a folded node's marker is highlighted orange — a collapsed turn's preview elbow, a collapsed group's incoming `├─`/`╰─`. Top-level groups in the general view have no connector, so a folded one shows its label in **bold** instead (they start expanded; folding one is deliberate).
 
 - `space` masks/unmasks the selected node — a group, a turn, a pair, or a single item. It is a clean two-state cycle: if **anything** under the node is masked (even partially, even by a mask set in the other view), the first press clears it all; the next press masks the whole node. Unmasking a child under a masked group automatically splits the group mask so only that child comes back. This works across views: mask a turn in session view, unmask one item from general view, and only that item returns.
   - Masking a **pair row** stubs the result but keeps the call visible; masking a **turn** removes the whole section (calls and results drop together, safely).

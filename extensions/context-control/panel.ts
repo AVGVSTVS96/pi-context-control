@@ -120,25 +120,29 @@ export class ContextPanel implements Focusable {
 	private rebuildRows(): void {
 		this.rows = [];
 		// Guide prefixes place each child's connector directly under its
-		// parent's ○ marker; `base` is the blank/│ run up to that column.
+		// parent's marker; `base` is the blank/│ run up to that column.
+		const TEE = "├─ ";
+		const ELBOW = "╰─ ";
+		const PIPE = "│  ";
+		const BLANK = "   ";
 		const walkChildren = (node: TreeNode, base: string) => {
 			node.children.forEach((child, i) => {
 				const last = i === node.children.length - 1;
-				this.rows.push({ node: child, guide: base + (last ? "└ " : "├ ") });
+				this.rows.push({ node: child, guide: base + (last ? ELBOW : TEE) });
 				if (!child.isLeaf && this.expanded.has(child.id)) {
-					walkChildren(child, `${base + (last ? "  " : "│ ")}  `);
+					walkChildren(child, base + (last ? BLANK : PIPE));
 				}
 			});
 		};
 		for (const root of this.model.roots) {
 			this.rows.push({ node: root, guide: "" });
 			if (this.expanded.has(root.id)) {
-				walkChildren(root, "  ");
+				walkChildren(root, "");
 			} else if (this.view === "session") {
 				// Collapsed turn: keep the turn's final assistant message visible,
 				// elbowed off the turn's marker, so every turn reads as user → reply.
 				const reply = [...root.children].reverse().find((c) => c.kind === "assistant-text");
-				if (reply) this.rows.push({ node: reply, guide: "  └ " });
+				if (reply) this.rows.push({ node: reply, guide: ELBOW });
 			}
 		}
 	}
@@ -332,11 +336,12 @@ export class ContextPanel implements Focusable {
 		const { node, guide } = row;
 		const partial = !node.masked && node.effectiveTokens < node.rawTokens;
 
-		const marker = node.masked ? "✕" : partial ? "◐" : "○";
-		const fold = node.isLeaf ? "" : this.expanded.has(node.id) ? "▾ " : "▸ ";
+		// ✕ masked · ◐ partially masked · ● collapsed (content folded inside) · ○ fully shown
+		const collapsed = !node.isLeaf && !this.expanded.has(node.id);
+		const marker = node.masked ? "✕" : partial ? "◐" : collapsed ? "●" : "○";
 
 		const labelW = Math.max(10, innerW - COUNT_COL - TOKEN_COL - 12);
-		const headW = visibleWidth(`${guide}${fold}${marker} `);
+		const headW = visibleWidth(`${guide}${marker} `);
 		let label = node.label || "(empty)";
 		if (headW + visibleWidth(label) > labelW) {
 			label = `${label.slice(0, Math.max(1, labelW - headW - 2))}…`;
@@ -359,7 +364,7 @@ export class ContextPanel implements Focusable {
 			labelColored = node.isLeaf ? th.fg("muted", label) : th.fg("text", label);
 		}
 
-		const left = `${th.fg("dim", guide)}${fold}${markerColored} ${labelColored}`;
+		const left = `${th.fg("dim", guide)}${markerColored} ${labelColored}`;
 		const pad = " ".repeat(Math.max(1, labelW - headW - visibleWidth(label)));
 		const countColored = th.fg("warning", count);
 		const tokensColored = node.masked ? th.fg("dim", tokens) : th.fg("accent", tokens);

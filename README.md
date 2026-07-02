@@ -14,15 +14,15 @@ Run `/ctx` (or `ctrl+alt+c`) to open the panel:
 │ messages: 21 · tokens: 16.5K raw · 10.5K masked out · 6.0K effective │
 │ ↑↓ move · ←→ fold · <space> mask/unmask · <tab> raw/effective · …    │
 │ ──────────────────────────────────────────────────────────────────── │
-│ ▾ ○ assistant                                  7x       5_556 tokens │
-│   ├ ▸ ○ reasoning                              6x       5_304 tokens │
-│   ├ ▸ ○ text                                   7x          90 tokens │
-│   └ ▾ ○ tool-call                             12x         162 tokens │
-│       ├ ▸ ○ bash                               6x          96 tokens │
-│       └ ▸ ○ read                               6x          66 tokens │
-│ ▾ ○ user                                       2x          28 tokens │
-│ ▾ ✕ tool                                      12x         420 tokens │
-│   └ ▾ ✕ tool-result                           12x         420 tokens │
+│ ○ assistant                                    7x       5_556 tokens │
+│ ├─ ● reasoning                                 6x       5_304 tokens │
+│ ├─ ● text                                      7x          90 tokens │
+│ ╰─ ○ tool-call                                12x         162 tokens │
+│    ├─ ● bash                                   6x          96 tokens │
+│    ╰─ ● read                                   6x          66 tokens │
+│ ○ user                                         2x          28 tokens │
+│ ✕ tool                                        12x         420 tokens │
+│ ╰─ ✕ tool-result                              12x         420 tokens │
 ╰──────────────────────────────────────────────────────────────────────╯
 ```
 
@@ -31,16 +31,18 @@ Run `/ctx` (or `ctrl+alt+c`) to open the panel:
   - **session view** — turn → items in chronological order ("when it happened"). A turn is the section starting at each user message. Each tool call and its result appear as one pair row (`read · /src/config/loader.ts`), expandable into call and result. A **collapsed** turn still shows its final assistant reply, elbowed off the turn's marker, so every turn reads as question → answer at a glance:
 
   ```
-  ▸ ○ turn 1 · Please look at the config loader and fix…   20x  14_841 tokens
-    └ ○ assistant · Found it: parseEnv drops empty-str…      1x      24 tokens
-  ▾ ◐ turn 2 · Great — write a regression test for that…     6x   1_204 tokens
-    ├ ○ user · Great — write a regression test for that…     1x      11 tokens
-    ├ ○ reasoning · A test needs the same empty-string…      1x     240 tokens
-    ├ ▾ ✕ read · /src/config/loader-0.ts                     1x      65 tokens
-    │   ├ ○ call                                             1x      11 tokens
-    │   └ ✕ result · export function parseConfig(env)…       1x      54 tokens
-    └ ○ assistant · Added tests/config-loader.test.ts…       1x      17 tokens
+  ● turn 1 · Please look at the config loader and fix…     20x  14_841 tokens
+  ╰─ ○ assistant · Found it: parseEnv drops empty-str…       1x      24 tokens
+  ◐ turn 2 · Great — write a regression test for that…       6x   1_204 tokens
+  ├─ ○ user · Great — write a regression test for that…      1x      11 tokens
+  ├─ ○ reasoning · A test needs the same empty-string…       1x     240 tokens
+  ├─ ✕ read · /src/config/loader-0.ts                        1x      65 tokens
+  │  ├─ ○ call                                               1x      11 tokens
+  │  ╰─ ✕ result · export function parseConfig(env)…         1x      54 tokens
+  ╰─ ○ assistant · Added tests/config-loader.test.ts…        1x      17 tokens
   ```
+
+- Circle markers carry both fold and mask state: **●** collapsed (content folded inside, `→` to open) · **○** fully shown · **◐** partially masked · **✕** masked out.
 
 - `space` masks/unmasks the selected node — a group, a turn, a pair, or a single item. Masking a group covers everything under it; unmasking a child under a masked group automatically splits the group mask so only that child comes back. This works across views: mask a turn in session view, unmask one item from general view, and only that item returns.
   - Masking a **pair row** stubs the result but keeps the call visible; masking a **turn** removes the whole section (calls and results drop together, safely).

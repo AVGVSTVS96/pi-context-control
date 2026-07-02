@@ -53,5 +53,6 @@ Token counts are estimates (chars/4, matching pi's own estimator, plus a correct
 
 ## Roadmap
 
-- Phase 2: always-visible compact usage widget, mask presets (e.g. "tool results older than N turns"), richer stubs.
-- Phase 3: non-destructive summarization — swap a masked span for a generated summary at send time, integrate with pi compaction.
+- Phase 2 (QoL): always-visible compact usage widget, mask presets (e.g. "tool results older than N turns"), richer stubs.
+- Phase 3 (cache awareness): visualize prompt-cache impact of masking. Caching is prefix-based, so masking any item invalidates the cache for everything after it — the suffix is rewritten to cache on the next call, then the smaller prefix caches again and the savings recur every call. Planned: per-node impact preview when selected ("saves ~X/call · breaks ~Y cached · pays off after ~N calls"), a pending-changes line showing the earliest cache-break point (batched masks break the cache once), a tree marker at that boundary, and real `cacheRead`/`cacheWrite` numbers from pi's recorded usage to keep estimates honest.
+- Phase 4 (summarization): non-destructive summarization — swap a masked span for a generated summary at send time, integrate with pi compaction.

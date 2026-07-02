@@ -1,0 +1,31 @@
+{
+    "name": "pi-context-control",
+    "version": "0.1.0",
+    "description": "Interactive context window manager for pi: see per-message token usage and mask anything in/out of context at will.",
+    "type": "module",
+    "license": "MIT",
+    "files": [
+        "extensions",
+        "README.md",
+        "LICENSE"
+    ],
+    "scripts": {
+        "typecheck": "tsc --noEmit"
+    },
+    "keywords": [
+        "pi-package"
+    ],
+    "pi": {
+        "extensions": [
+            "./extensions"
+        ]
+    },
+    "peerDependencies": {
+        "@earendil-works/pi-ai": "*",
+        "@earendil-works/pi-coding-agent": "*",
+        "@earendil-works/pi-tui": "*"
+    },
+    "devDependencies": {
+        "typescript": "^5.0.0"
+    }
+}

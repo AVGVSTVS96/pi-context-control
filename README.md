@@ -1,0 +1,57 @@
+# pi-context-control
+
+Interactive context window manager for [pi](https://pi.dev). See exactly what is in your LLM context — every message, reasoning block, tool call, and tool result, with token estimates — and mask any of it in or out of context at will.
+
+Masking is **non-destructive**: it is applied via pi's `context` event right before each LLM call. The session file is never modified, and everything is reversible at any time.
+
+## Usage
+
+Run `/ctx` (or `ctrl+alt+c`) to open the panel:
+
+```
+╭──────────────────────────────────────────────────────────────────────╮
+│ Context Token Usage (effective)                                      │
+│ messages: 21 · tokens: 16.5K raw · 10.5K masked out · 6.0K effective │
+│ ↑↓ move · ←→ fold · <space> mask/unmask · <tab> raw/effective · …    │
+│ ──────────────────────────────────────────────────────────────────── │
+│ ▾ ○ assistant                                  7x       5_556 tokens │
+│   ▸ ○ reasoning                                6x       5_304 tokens │
+│   ▸ ○ text                                     7x          90 tokens │
+│   ▾ ○ tool-call                               12x         162 tokens │
+│     ▸ ○ bash                                   6x          96 tokens │
+│     ▸ ○ read                                   6x          66 tokens │
+│ ▾ ○ user                                       2x          28 tokens │
+│ ▾ ✕ tool                                      12x         420 tokens │
+│   ▾ ✕ tool-result                             12x         420 tokens │
+╰──────────────────────────────────────────────────────────────────────╯
+```
+
+- The tree groups context by role → content type → tool, expandable down to individual messages.
+- `space` masks/unmasks the selected node (a whole group or a single message). Masking a group covers everything under it; unmasking a child under a masked group automatically splits the group mask so only that child comes back.
+- `tab` switches the token column between **raw** (what the history costs unmasked) and **effective** (what will actually be sent after masking).
+- `i` returns focus to the editor while the panel stays open above the input; `/ctx` focuses it again. `esc` closes it.
+- Mask state persists in the session (as a `custom` entry pi never sends to the model) and is restored on `/resume`.
+
+## Masking semantics
+
+| Node | Effect on the outgoing context |
+|---|---|
+| tool result | Content replaced with a one-line stub noting what was hidden (keeps toolCall/toolResult pairing valid) |
+| tool call | Call block removed **and** its paired result dropped |
+| assistant text / reasoning | Block stripped from the assistant message |
+| user text / image | Block removed (message dropped if nothing remains) |
+| meta (summaries, custom, bash) | Message dropped |
+
+Token counts are estimates (chars/4, matching pi's own estimator, plus a correction for encrypted thinking signatures which cost ~chars, not chars/4).
+
+## Install
+
+```bash
+# from a project's .pi/settings.json or ~/.pi/settings.json
+{ "packages": ["path/to/pi-context-control"] }
+```
+
+## Roadmap
+
+- Phase 2: always-visible compact usage widget, mask presets (e.g. "tool results older than N turns"), richer stubs.
+- Phase 3: non-destructive summarization — swap a masked span for a generated summary at send time, integrate with pi compaction.

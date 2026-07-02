@@ -12,7 +12,7 @@
  */
 
 import { groups, pairId } from "./keys.ts";
-import type { LeafIndex, LeafInfo } from "./leaves.ts";
+import type { LeafIndex, LeafInfo, LeafKind } from "./leaves.ts";
 import type { MaskState } from "./masking.ts";
 
 export interface TreeNode {
@@ -31,6 +31,8 @@ export interface TreeNode {
 	masked: boolean;
 	/** Leaves: full covering chain for mask toggling. */
 	chain?: readonly string[];
+	/** Leaves: what kind of content this is (drives per-view affordances). */
+	kind?: LeafKind;
 }
 
 export interface ContextTreeModel {
@@ -87,6 +89,7 @@ class TreeBuilder {
 			selfMasked: this.state.has(leaf.id),
 			masked: this.state.anyMasked(leaf.chain),
 			chain: leaf.chain,
+			kind: leaf.kind,
 		};
 		parent.children.push(node);
 		// Propagate tokens and counts up the group chain.
@@ -206,7 +209,7 @@ export function buildSessionTree(idx: LeafIndex, state: MaskState): ContextTreeM
 				b.leaf(turn, leaf, effective, `user · ${leaf.label}`);
 				break;
 			case "assistant-text":
-				b.leaf(turn, leaf, effective, `text · ${leaf.label}`);
+				b.leaf(turn, leaf, effective, `assistant · ${leaf.label}`);
 				break;
 			case "reasoning":
 				b.leaf(turn, leaf, effective, `reasoning · ${leaf.label}`);

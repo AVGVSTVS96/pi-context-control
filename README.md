@@ -58,7 +58,7 @@ Run `/ctx` (or `ctrl+alt+c`) to open the panel:
   ```
 
 - The panel is **cache-aware**: prompt caching is prefix-based, so any change (mask or unmask) rewrites everything after it on the next call.
-  - The footer previews the selected node: `mask: saves ~1.2K/call · rewrites ~8.0K cached · pays off in ~16 calls`.
+  - The footer previews the selected node: `mask: saves ~1.2K/call · rewrites ~8.0K cached · pays off in ~16 calls`. Payback uses the active model's own cache pricing.
   - Unapplied changes show a pending line — batched masks break the cache once, at the earliest change: `⚡ pending: cache breaks at turn 3 · ~8.0K rewritten next call (45.2K cached now)`. The cached size is the provider's real usage number.
   - The session view draws a `┄┄ cache breaks here ┄┄` line at the break point, and the below-editor widget warns `next call rewrites ~8.0K cache` while a break is pending.
 - The panel renders **in flow** between the transcript and the input, stacking with widgets from other extensions.

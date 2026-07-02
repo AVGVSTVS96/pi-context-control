@@ -19,7 +19,7 @@ import {
 	type Theme,
 } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey } from "@earendil-works/pi-tui";
-import { diffAgainstSnapshot, type SentSnapshot, sentStream, toggleImpact } from "./cache.ts";
+import { cacheCosts, diffAgainstSnapshot, type SentSnapshot, sentStream, toggleImpact } from "./cache.ts";
 import { formatCompact } from "./estimate.ts";
 import type { AnyMessage } from "./keys.ts";
 import { indexLeaves, type LeafIndex, maskedLeafCount, pruneStaleMasks } from "./leaves.ts";
@@ -224,7 +224,7 @@ export default function contextControl(pi: ExtensionAPI): void {
 						persist();
 						refresh(ctx);
 					},
-					onImpact: (node) => toggleImpact(node, contextIndex(ctx), state, lastSent),
+					onImpact: (node) => toggleImpact(node, contextIndex(ctx), state, lastSent, cacheCosts(ctx.model)),
 					onPreset: (preset, value) => {
 						if (preset.apply(state, contextIndex(ctx), value) > 0) persist();
 						refresh(ctx);

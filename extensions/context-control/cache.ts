@@ -4,10 +4,10 @@
  * Prompt caching is prefix-based: the provider caches the prompt exactly as
  * sent on the last call, and the next call reuses the longest unchanged
  * prefix. Any edit (masking or unmasking) rewrites everything after the edit
- * point: those tokens are written to cache once more (~1.25x base price),
- * after which the smaller prompt reads from cache again (~0.1x) on every
- * later call. So masking near the tail is nearly free, while masking early
- * content pays a large one-time rewrite for a small per-call saving.
+ * point: those tokens are written to cache once more (at the model's cache
+ * write rate), after which the smaller prompt reads from cache again on
+ * every later call. So masking near the tail is nearly free, while masking
+ * early content pays a large one-time rewrite for a small per-call saving.
  *
  * We snapshot the outgoing leaf stream on every `context` event — that is
  * precisely what the provider cached — and diff the would-send stream
@@ -18,9 +18,28 @@
 import { droppedCallIds, type LeafIndex } from "./leaves.ts";
 import { type MaskableNode, MaskState, toggleNodeMask } from "./masking.ts";
 
-/** Anthropic pricing multipliers relative to base input tokens. */
-const CACHE_WRITE_MULT = 1.25;
-const CACHE_READ_MULT = 0.1;
+/** Cache pricing relative to plain input tokens, from the model's cost table. */
+export interface CacheCosts {
+	writeMult: number;
+	readMult: number;
+}
+
+/** Fallback when the model doesn't price caching (Anthropic-style rates). */
+export const DEFAULT_CACHE_COSTS: CacheCosts = { writeMult: 1.25, readMult: 0.1 };
+
+/**
+ * Derive multipliers from the active model's per-token rates. A zero
+ * cacheWrite rate means the provider bills cache misses as plain input
+ * (OpenAI, Gemini) — a 1x write, not a free one.
+ */
+export function cacheCosts(model?: { cost?: { input: number; cacheRead: number; cacheWrite: number } }): CacheCosts {
+	const c = model?.cost;
+	if (!c || !(c.input > 0) || !(c.cacheRead > 0)) return DEFAULT_CACHE_COSTS;
+	return {
+		writeMult: c.cacheWrite > 0 ? c.cacheWrite / c.input : 1,
+		readMult: c.cacheRead / c.input,
+	};
+}
 
 /** The ordered leaf stream as actually sent (masked leaves dropped/stubbed). */
 export interface SentStream {
@@ -123,6 +142,7 @@ export function toggleImpact(
 	idx: LeafIndex,
 	state: MaskState,
 	snap: SentSnapshot | undefined,
+	costs: CacheCosts = DEFAULT_CACHE_COSTS,
 ): ToggleImpact {
 	const sim = new MaskState();
 	sim.load(state.toJSON());
@@ -137,12 +157,12 @@ export function toggleImpact(
 	const extraBrokenTokens = Math.max(0, toggled.brokenTokens - baseline.brokenTokens);
 	const extraRewrittenTokens = Math.max(0, toggled.rewrittenTokens - baseline.rewrittenTokens);
 
-	// One-time cost: rewritten tokens cost a write (1.25x) instead of a read
-	// (0.1x). Recurring gain: masked tokens stop costing a read every call.
+	// One-time cost: rewritten tokens cost a write instead of a read.
+	// Recurring gain: masked tokens stop costing a read every call.
 	let paybackCalls: number | undefined;
-	if (deltaPerCall > 0) {
-		const breakCost = extraRewrittenTokens * (CACHE_WRITE_MULT - CACHE_READ_MULT);
-		paybackCalls = Math.ceil(breakCost / (deltaPerCall * CACHE_READ_MULT));
+	if (deltaPerCall > 0 && costs.readMult > 0) {
+		const breakCost = extraRewrittenTokens * Math.max(0, costs.writeMult - costs.readMult);
+		paybackCalls = Math.ceil(breakCost / (deltaPerCall * costs.readMult));
 	}
 
 	return {

@@ -10,6 +10,7 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { type Focusable, matchesKey, type TUI, visibleWidth } from "@earendil-works/pi-tui";
 import { formatCompact, formatExact } from "./estimate.ts";
+import { PRESETS, type Preset } from "./presets.ts";
 import type { ContextTreeModel, TreeNode } from "./tree.ts";
 
 export type TokenMode = "effective" | "raw";
@@ -17,6 +18,8 @@ export type TokenMode = "effective" | "raw";
 export interface PanelCallbacks {
 	/** Toggle mask state for a node; caller rebuilds the model and calls setModel(). */
 	onToggleMask: (node: TreeNode) => void;
+	/** Apply a mask preset; caller rebuilds the model and calls setModel(). */
+	onPreset: (preset: Preset) => void;
 	/** Close the panel entirely. */
 	onClose: () => void;
 	/** Keep the panel visible but return keyboard focus to the editor. */
@@ -41,6 +44,8 @@ export class ContextPanel implements Focusable {
 	private selected = 0;
 	private scroll = 0;
 	private rows: Row[] = [];
+	private presetMode = false;
+	private presetSelected = 0;
 
 	private tui: TUI;
 	private theme: Theme;
@@ -89,6 +94,10 @@ export class ContextPanel implements Focusable {
 	}
 
 	handleInput(data: string): void {
+		if (this.presetMode) {
+			this.handlePresetInput(data);
+			return;
+		}
 		const row = this.rows[this.selected];
 		if (matchesKey(data, "escape") || data === "q") {
 			this.callbacks.onClose();
@@ -96,6 +105,11 @@ export class ContextPanel implements Focusable {
 		}
 		if (data === "i") {
 			this.callbacks.onUnfocus();
+			return;
+		}
+		if (data === "p") {
+			this.presetMode = true;
+			this.presetSelected = 0;
 			return;
 		}
 		if (matchesKey(data, "up")) {
@@ -131,6 +145,31 @@ export class ContextPanel implements Focusable {
 		this.clampScroll();
 	}
 
+	private handlePresetInput(data: string): void {
+		if (matchesKey(data, "escape") || data === "q" || data === "p") {
+			this.presetMode = false;
+			return;
+		}
+		if (matchesKey(data, "up")) {
+			this.presetSelected = Math.max(0, this.presetSelected - 1);
+			return;
+		}
+		if (matchesKey(data, "down")) {
+			this.presetSelected = Math.min(PRESETS.length - 1, this.presetSelected + 1);
+			return;
+		}
+		let pick = -1;
+		if (matchesKey(data, "return") || matchesKey(data, "space")) {
+			pick = this.presetSelected;
+		} else if (/^[1-9]$/.test(data)) {
+			pick = Number(data) - 1;
+		}
+		if (pick >= 0 && pick < PRESETS.length) {
+			this.presetMode = false;
+			this.callbacks.onPreset(PRESETS[pick]);
+		}
+	}
+
 	private clampScroll(): void {
 		const visible = Math.min(BODY_MAX_ROWS, this.rows.length);
 		if (this.selected < this.scroll) this.scroll = this.selected;
@@ -150,7 +189,8 @@ export class ContextPanel implements Focusable {
 		lines.push(th.fg("border", `╭${"─".repeat(innerW)}╮`));
 
 		// Header
-		lines.push(boxRow(th.bold(th.fg("accent", `Context Token Usage (${this.mode})`))));
+		const title = this.presetMode ? "Context Token Usage — presets" : `Context Token Usage (${this.mode})`;
+		lines.push(boxRow(th.bold(th.fg("accent", title))));
 		const raw = this.model.rawTotal;
 		const effective = this.model.effectiveTotal;
 		const maskedOut = Math.max(0, raw - effective);
@@ -170,12 +210,25 @@ export class ContextPanel implements Focusable {
 		);
 		lines.push(
 			boxRow(
-				th.fg("dim", "↑↓ move · ←→ fold · <space> mask/unmask · <tab> raw/effective · <i> input · <esc> close"),
+				th.fg(
+					"dim",
+					this.presetMode
+						? "↑↓ move · <enter> apply · <1-5> quick apply · <esc> back"
+						: "↑↓ move · ←→ fold · <space> mask/unmask · <tab> raw/effective · <p> presets · <i> input · <esc> close",
+				),
 			),
 		);
 		lines.push(boxRow(th.fg("borderMuted", "─".repeat(innerW - 2))));
 
 		// Body
+		if (this.presetMode) {
+			for (let i = 0; i < PRESETS.length; i++) {
+				lines.push(this.renderPresetRow(i, i === this.presetSelected, innerW));
+			}
+			lines.push(boxRow(th.fg("dim", `(${this.presetSelected + 1}/${PRESETS.length})`)));
+			lines.push(th.fg("border", `╰${"─".repeat(innerW)}╯`));
+			return lines;
+		}
 		this.clampScroll();
 		const visible = Math.min(BODY_MAX_ROWS, this.rows.length);
 		for (let i = this.scroll; i < this.scroll + visible; i++) {
@@ -188,6 +241,17 @@ export class ContextPanel implements Focusable {
 		lines.push(boxRow(th.fg("dim", `(${this.rows.length === 0 ? 0 : this.selected + 1}/${this.rows.length})`)));
 		lines.push(th.fg("border", `╰${"─".repeat(innerW)}╯`));
 		return lines;
+	}
+
+	private renderPresetRow(index: number, isSelected: boolean, innerW: number): string {
+		const th = this.theme;
+		const preset = PRESETS[index];
+		const num = th.fg("warning", `${index + 1}.`);
+		const label = th.fg("text", preset.label);
+		let line = `  ${num} ${label}`;
+		line += " ".repeat(Math.max(0, innerW - visibleWidth(line)));
+		if (isSelected) line = th.bg("selectedBg", line);
+		return th.fg("border", "│") + line + th.fg("border", "│");
 	}
 
 	private renderRow(row: Row, isSelected: boolean, innerW: number): string {

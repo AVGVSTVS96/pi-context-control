@@ -8,6 +8,7 @@
  */
 
 import {
+	estimateChars,
 	estimateContent,
 	estimateTextBlock,
 	estimateThinkingBlock,
@@ -15,10 +16,8 @@ import {
 	IMAGE_TOKENS,
 } from "./estimate.ts";
 import { type AnyMessage, groups, leafId } from "./keys.ts";
-import { chains, type MaskState } from "./masking.ts";
-
-/** Approximate cost of the stub text left in place of a masked tool result. */
-export const RESULT_STUB_TOKENS = 35;
+import { chains, maskedResultStub, type MaskState } from "./masking.ts";
+import { collectCallSummaries, firstLine, summarizeArgs, textOf } from "./summarize.ts";
 
 export interface TreeNode {
 	id: string;
@@ -41,24 +40,6 @@ export interface ContextTreeModel {
 	messageCount: number;
 	rawTotal: number;
 	effectiveTotal: number;
-}
-
-function firstLine(text: string, max = 64): string {
-	const line = text.trimStart().split("\n", 1)[0] ?? "";
-	return line.length > max ? `${line.slice(0, max - 1)}…` : line;
-}
-
-function summarizeArgs(args: unknown): string {
-	if (!args || typeof args !== "object") return "";
-	const a = args as Record<string, unknown>;
-	for (const key of ["file_path", "path", "command", "pattern", "query", "url"]) {
-		if (typeof a[key] === "string") return firstLine(a[key] as string, 48);
-	}
-	try {
-		return firstLine(JSON.stringify(a), 48);
-	} catch {
-		return "";
-	}
 }
 
 class TreeBuilder {
@@ -118,6 +99,7 @@ class TreeBuilder {
 
 export function buildTree(messages: AnyMessage[], state: MaskState): ContextTreeModel {
 	const b = new TreeBuilder(state);
+	const callSummaries = collectCallSummaries(messages);
 
 	// Precompute tool calls dropped by call-masking: their paired results are
 	// dropped entirely rather than stubbed, and assistant counts need them.
@@ -239,7 +221,10 @@ export function buildTree(messages: AnyMessage[], state: MaskState): ContextTree
 				const raw = estimateContent(m.content);
 				const dropped = m.toolCallId ? droppedCalls.has(m.toolCallId) : false;
 				const masked = state.anyMasked(chains.toolResult(m));
-				const effective = dropped ? 0 : masked ? Math.min(raw, RESULT_STUB_TOKENS) : raw;
+				const stubTokens = masked
+					? estimateChars(maskedResultStub(m, m.toolCallId ? callSummaries.get(m.toolCallId) : undefined))
+					: 0;
+				const effective = dropped ? 0 : masked ? Math.min(raw, stubTokens) : raw;
 				const resultGroup = b.group(groups.toolResult, "tool-result", tool);
 				const label = typeof m.content === "string" ? firstLine(m.content) : firstLine(textOf(m.content));
 				b.leaf(b.group(groups.toolResultFor(name), name, resultGroup), leafId.toolResult(m.toolCallId ?? ""), label, raw, effective);
@@ -275,15 +260,6 @@ export function buildTree(messages: AnyMessage[], state: MaskState): ContextTree
 	const rawTotal = roots.reduce((sum, r) => sum + r.rawTokens, 0);
 	const effectiveTotal = roots.reduce((sum, r) => sum + r.effectiveTokens, 0);
 	return { roots, messageCount: messages.length, rawTotal, effectiveTotal };
-}
-
-function textOf(content: unknown): string {
-	if (typeof content === "string") return content;
-	if (!Array.isArray(content)) return "";
-	for (const block of content) {
-		if (block?.type === "text" && block.text) return block.text;
-	}
-	return "";
 }
 
 function estimateMeta(m: AnyMessage): number {

@@ -15,6 +15,7 @@
 
 import { estimateContent, formatCompact } from "./estimate.ts";
 import { type AnyMessage, groups, leafId } from "./keys.ts";
+import { collectCallSummaries, firstLine, textOf } from "./summarize.ts";
 
 export class MaskState {
 	private masked = new Set<string>();
@@ -116,10 +117,19 @@ export function toggleNodeMask(state: MaskState, node: MaskableNode): void {
 	}
 }
 
-function maskedResultStub(m: AnyMessage): string {
+/**
+ * The stub left in place of a masked tool result. Says what the call was for
+ * and how the result began, so the model can decide whether the hidden
+ * content matters before asking for it back. Exported so the tree can price
+ * the stub exactly.
+ */
+export function maskedResultStub(m: AnyMessage, callSummary?: string): string {
 	const tokens = estimateContent(m.content);
 	const tool = m.toolName ?? "tool";
-	return `[${tool} result hidden by the user via context-control (~${formatCompact(tokens)} tokens masked out). Ask the user to unmask it if you need it.]`;
+	const target = callSummary ? ` for \`${callSummary}\`` : "";
+	const preview = firstLine(textOf(m.content), 80);
+	const began = preview ? ` It began: "${preview}".` : "";
+	return `[${tool} result${target} hidden by the user via context-control (~${formatCompact(tokens)} tokens masked out).${began} Ask the user to unmask it if you need it.]`;
 }
 
 /**
@@ -129,6 +139,7 @@ function maskedResultStub(m: AnyMessage): string {
 export function applyMask(messages: AnyMessage[], state: MaskState): AnyMessage[] {
 	if (state.size === 0) return messages;
 
+	const callSummaries = collectCallSummaries(messages);
 	const droppedCalls = new Set<string>();
 	const out: AnyMessage[] = [];
 
@@ -142,7 +153,8 @@ export function applyMask(messages: AnyMessage[], state: MaskState): AnyMessage[
 			case "toolResult": {
 				if (m.toolCallId && droppedCalls.has(m.toolCallId)) break;
 				if (state.anyMasked(chains.toolResult(m))) {
-					out.push({ ...m, content: [{ type: "text", text: maskedResultStub(m) }], details: undefined });
+					const stub = maskedResultStub(m, m.toolCallId ? callSummaries.get(m.toolCallId) : undefined);
+					out.push({ ...m, content: [{ type: "text", text: stub }], details: undefined });
 				} else {
 					out.push(m);
 				}

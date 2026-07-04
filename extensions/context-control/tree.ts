@@ -37,32 +37,43 @@ export interface TreeNode {
 }
 
 /**
- * Span coverage shared by both builders: which leaves each applied summary
+ * Span coverage shared by both builders: which leaves each APPLIED summary
  * replaces (they render at 0 effective), and where each record's synthetic
- * node sits (at its first covered leaf, pending records included so an
- * in-flight "generating…" row has a position too).
+ * node sits (at its first covered leaf). Pending and inactive records get a
+ * row too — "generating…" and a dimmed re-appliable summary — but cover
+ * nothing until applied.
  */
 function summaryCoverage(idx: LeafIndex, records: readonly SummaryRecord[]) {
 	const applied = new Set<string>();
-	const nodeAt = new Map<string, SummaryRecord>();
+	const nodeAt = new Map<string, SummaryRecord[]>();
 	const placed = new Set<string>();
-	const byLeaf = new Map<string, SummaryRecord>();
-	for (const r of records) for (const id of r.leafIds) byLeaf.set(id, r);
+	const byLeaf = new Map<string, SummaryRecord[]>();
+	for (const r of records) {
+		for (const id of r.leafIds) {
+			const list = byLeaf.get(id) ?? [];
+			list.push(r);
+			byLeaf.set(id, list);
+		}
+	}
 	for (const leaf of idx.leaves) {
-		const r = byLeaf.get(leaf.id);
-		if (!r) continue;
-		if (!r.pending) applied.add(leaf.id);
-		if (!placed.has(r.id)) {
+		const rs = byLeaf.get(leaf.id);
+		if (!rs) continue;
+		if (rs.some((r) => r.active && !r.pending)) applied.add(leaf.id);
+		for (const r of rs) {
+			if (placed.has(r.id)) continue;
 			placed.add(r.id);
-			nodeAt.set(leaf.id, r);
+			const at = nodeAt.get(leaf.id) ?? [];
+			at.push(r);
+			nodeAt.set(leaf.id, at);
 		}
 	}
 	return { applied, nodeAt };
 }
 
-/** Synthetic row standing in for a summarized span. raw is 0: unmasking it removes the digest. */
-function summaryLeaf(record: SummaryRecord, turnId: string): { info: LeafInfo; effective: number } {
+/** Synthetic row standing in for a summarized span. raw is 0: restoring it removes the digest. */
+function summaryLeaf(record: SummaryRecord, turnId: string): { info: LeafInfo; effective: number; masked: boolean } {
 	const id = summaryNodeId(record);
+	const appliedNow = record.active && !record.pending;
 	return {
 		info: {
 			id,
@@ -73,7 +84,10 @@ function summaryLeaf(record: SummaryRecord, turnId: string): { info: LeafInfo; e
 			raw: 0,
 			timestamp: record.createdAt,
 		},
-		effective: summaryTokens(record),
+		effective: appliedNow ? summaryTokens(record) : 0,
+		// Inactive = switched off: render like masked content so it reads as
+		// "here, but not sent" and space can switch it back on.
+		masked: !record.active && !record.pending,
 	};
 }
 
@@ -118,7 +132,7 @@ class TreeBuilder {
 		return node;
 	}
 
-	leaf(parent: TreeNode, leaf: LeafInfo, effective: number, label?: string): void {
+	leaf(parent: TreeNode, leaf: LeafInfo, effective: number, label?: string, forceMasked = false): void {
 		const node: TreeNode = {
 			id: leaf.id,
 			label: label ?? leaf.label,
@@ -129,7 +143,7 @@ class TreeBuilder {
 			parent,
 			isLeaf: true,
 			selfMasked: this.state.has(leaf.id),
-			masked: this.state.anyMasked(leaf.chain),
+			masked: forceMasked || this.state.anyMasked(leaf.chain),
 			chain: leaf.chain,
 			kind: leaf.kind,
 		};
@@ -164,10 +178,10 @@ export function buildTree(idx: LeafIndex, state: MaskState, summaries: readonly 
 	const tool = b.group(groups.tool, "tool", null);
 
 	for (const leaf of idx.leaves) {
-		const record = nodeAt.get(leaf.id);
-		if (record) {
+		for (const record of nodeAt.get(leaf.id) ?? []) {
 			const sum = summaryLeaf(record, leaf.turnId);
-			b.leaf(b.group(groups.metaFor("summary"), "summary", b.group(groups.meta, "meta", null)), sum.info, sum.effective);
+			const group = b.group(groups.metaFor("summary"), "summary", b.group(groups.meta, "meta", null));
+			b.leaf(group, sum.info, sum.effective, undefined, sum.masked);
 		}
 		const effective = applied.has(leaf.id) ? 0 : leafEffective(leaf, state, droppedCalls);
 		switch (leaf.kind) {
@@ -234,10 +248,9 @@ export function buildSessionTree(
 	for (const leaf of idx.leaves) {
 		const effective = applied.has(leaf.id) ? 0 : leafEffective(leaf, state, droppedCalls);
 		const turn = b.group(leaf.turnId, turnLabels.get(leaf.turnId) ?? leaf.turnId, null);
-		const record = nodeAt.get(leaf.id);
-		if (record) {
+		for (const record of nodeAt.get(leaf.id) ?? []) {
 			const sum = summaryLeaf(record, leaf.turnId);
-			b.leaf(turn, sum.info, sum.effective);
+			b.leaf(turn, sum.info, sum.effective, undefined, sum.masked);
 		}
 		switch (leaf.kind) {
 			case "user-text":

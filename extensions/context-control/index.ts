@@ -283,26 +283,66 @@ export default function contextControl(pi: ExtensionAPI): void {
 			generations.delete(record.id);
 			store.remove(record.id);
 		} else {
-			record.active = !record.active;
+			if (record.active) record.active = false;
+			else store.activate(record); // switches off any overlapping record
 			persist();
 		}
 		refresh(ctx);
 	}
 
+	/** Applied summaries anywhere under a tree node. */
+	function appliedSummariesUnder(node: TreeNode): SummaryRecord[] {
+		const out: SummaryRecord[] = [];
+		const visit = (n: TreeNode) => {
+			if (n.id.startsWith("sum:")) {
+				const record = store.get(n.id.slice(4));
+				if (record?.active && !record.pending) out.push(record);
+				return;
+			}
+			for (const child of n.children) visit(child);
+		};
+		visit(node);
+		return out;
+	}
+
+	/** Any real (non-summary) content under the node hidden by masks. */
+	function hasMaskedContent(node: TreeNode): boolean {
+		if (node.kind === "summary") return false;
+		if (node.isLeaf) return node.masked;
+		return state.has(node.id) || node.children.some(hasMaskedContent);
+	}
+
+	/**
+	 * Space on a non-summary node. Same two-state cycle as plain masking, but
+	 * an applied summary under the node counts as hidden content: the first
+	 * press brings everything back (restore summaries + clear masks), the
+	 * next press masks the whole node. Summaries are only switched off, never
+	 * discarded.
+	 */
+	function toggleNode(ctx: ExtensionContext, node: TreeNode): void {
+		const applied = appliedSummariesUnder(node);
+		if (applied.length > 0) {
+			for (const record of applied) record.active = false;
+			if (hasMaskedContent(node)) toggleNodeMask(state, node, contextIndex(ctx).leaves);
+		} else {
+			toggleNodeMask(state, node, contextIndex(ctx).leaves);
+		}
+		persist();
+		refresh(ctx);
+	}
+
 	async function summarizeSpan(ctx: ExtensionContext, nodes: TreeNode[]): Promise<void> {
-		const requested = spanLeafIds(nodes);
-		if (!requested) {
-			ctx.ui.notify("range includes an existing summary — restore it first (space)", "warning");
+		const span = canonicalSpan(spanLeafIds(nodes), contextIndex(ctx));
+		if (span.length === 0) {
+			ctx.ui.notify("nothing to summarize in that range", "warning");
 			return;
 		}
-		const span = canonicalSpan(requested, contextIndex(ctx));
-		if (span.length === 0) return;
 
 		// The same span again: re-apply the cached digest, no LLM call needed.
 		const existing = store.findBySpan(span);
 		if (existing) {
 			if (!existing.pending && !existing.active) {
-				existing.active = true;
+				store.activate(existing);
 				persist();
 				refresh(ctx);
 			}
@@ -380,13 +420,8 @@ export default function contextControl(pi: ExtensionAPI): void {
 			(tui, theme) => {
 				panel = new ContextPanel(tui, theme, buildModels(contextIndex(ctx)), allPresets, presetValues, {
 					onToggleMask: (node) => {
-						if (node.id.startsWith("sum:")) {
-							toggleSummary(ctx, node.id.slice(4));
-							return;
-						}
-						toggleNodeMask(state, node, contextIndex(ctx).leaves);
-						persist();
-						refresh(ctx);
+						if (node.id.startsWith("sum:")) toggleSummary(ctx, node.id.slice(4));
+						else toggleNode(ctx, node);
 					},
 					onSummarize: (nodes) => void summarizeSpan(ctx, nodes),
 					onImpact: (node) => {

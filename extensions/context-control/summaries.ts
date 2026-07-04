@@ -75,10 +75,25 @@ export class SummaryStore {
 		return this.records.filter((r) => r.active && !r.pending && r.leafIds.every((id) => present.has(id)));
 	}
 
-	/** Applicable records plus in-flight ones, for tree display. */
+	/**
+	 * Records the tree should show: in-flight ones, and every record whose
+	 * span still exists — including inactive (restored) ones, which render as
+	 * a dimmed row so a summary is never lost by toggling it off.
+	 */
 	visible(idx: LeafIndex): SummaryRecord[] {
-		const shown = this.applicable(idx);
-		return [...shown, ...this.records.filter((r) => r.pending)];
+		const present = new Set(idx.leaves.map((l) => l.id));
+		return this.records.filter((r) => r.pending || r.leafIds.every((id) => present.has(id)));
+	}
+
+	/** Activate a record, switching off any other active record sharing a leaf. */
+	activate(record: SummaryRecord): void {
+		const span = new Set(record.leafIds);
+		for (const other of this.records) {
+			if (other !== record && other.active && other.leafIds.some((id) => span.has(id))) {
+				other.active = false;
+			}
+		}
+		record.active = true;
 	}
 
 	/** An existing record covering exactly this span (order-insensitive). */
@@ -117,17 +132,14 @@ export class SummaryStore {
 /**
  * Leaf ids covered by a range of tree nodes, whole pairs enforced: a tool
  * call pulls in its result and vice versa (an unpaired call or result would
- * be rejected by providers). Returns undefined if the range touches an
- * existing summary node — spans over summaries aren't supported.
+ * be rejected by providers). Summary rows inside the range are transparent —
+ * a span always addresses the original leaves, and re-summarizing simply
+ * replaces the old record on completion.
  */
-export function spanLeafIds(nodes: readonly MaskableNode[]): string[] | undefined {
+export function spanLeafIds(nodes: readonly MaskableNode[]): string[] {
 	const ids = new Set<string>();
-	let blocked = false;
 	const visit = (node: MaskableNode) => {
-		if (node.id.startsWith("sum:")) {
-			blocked = true;
-			return;
-		}
+		if (node.id.startsWith("sum:")) return;
 		if (node.isLeaf) {
 			ids.add(node.id);
 			if (node.id.startsWith("call:")) ids.add(`result:${node.id.slice(5)}`);
@@ -137,7 +149,6 @@ export function spanLeafIds(nodes: readonly MaskableNode[]): string[] | undefine
 		for (const child of node.children) visit(child);
 	};
 	for (const node of nodes) visit(node);
-	if (blocked) return undefined;
 	return [...ids];
 }
 

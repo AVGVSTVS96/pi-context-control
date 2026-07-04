@@ -158,15 +158,19 @@ export class ContextPanel implements Focusable {
 	/** "mask: saves ~1.2K/call · rewrites ~8.0K cached · pays off in ~5 calls" */
 	private impactText(node: TreeNode): string {
 		if (node.kind === "summary") {
-			if (node.effectiveTokens === 0) return "summarizing…";
+			// Applied → space restores the originals; switched off → space
+			// re-applies the stored digest (no LLM call); generating → neither yet.
+			const off = node.masked;
+			if (!off && node.effectiveTokens === 0) return "summarizing…";
 			const impact = this.impactFor(node);
 			const delta = impact.deltaPerCall;
+			const action = off ? "apply" : "restore";
 			const verb = delta < 0 ? `adds ~${formatCompact(-delta)}/call back` : `saves ~${formatCompact(delta)}/call`;
 			const rewritten = impact.extraRewrittenTokens;
-			if (!impact.hasCache) return `restore: ${verb}`;
+			if (!impact.hasCache) return `${action}: ${verb}`;
 			return rewritten > 0
-				? `restore: ${verb} · rewrites ~${formatCompact(rewritten)} cached`
-				: `restore: ${verb} · breaks no cache`;
+				? `${action}: ${verb} · rewrites ~${formatCompact(rewritten)} cached`
+				: `${action}: ${verb} · breaks no cache`;
 		}
 		const impact = this.impactFor(node);
 		const delta = impact.deltaPerCall;
@@ -310,7 +314,7 @@ export class ContextPanel implements Focusable {
 			const range = this.anchorRange();
 			if (!range) {
 				if (row.node.kind === "summary") {
-					this.notice = "already a summary — <space> restores the originals";
+					this.notice = "already a summary — <space> applies/restores it";
 					return;
 				}
 				this.anchorId = row.node.id;
@@ -547,7 +551,7 @@ export class ContextPanel implements Focusable {
 		// context · § a summary standing in for replaced content. Folded nodes
 		// show their label in bold instead.
 		const isSummary = node.kind === "summary";
-		const generating = isSummary && node.effectiveTokens === 0;
+		const generating = isSummary && !node.masked && node.effectiveTokens === 0;
 		const marker = isSummary ? "§" : node.masked ? "✕" : partial ? "◐" : "○";
 		const folded = !node.isLeaf && !this.expanded.has(node.id);
 
@@ -565,8 +569,9 @@ export class ContextPanel implements Focusable {
 		let markerColored: string;
 		let labelColored: string;
 		if (isSummary) {
-			markerColored = th.fg(generating ? "dim" : "success", marker);
-			labelColored = th.fg(generating ? "dim" : "text", label);
+			markerColored = th.fg(generating || node.masked ? "dim" : "success", marker);
+			// Switched off: masked styling, so it reads as "here, but not sent".
+			labelColored = node.masked ? th.fg("dim", th.strikethrough(label)) : th.fg(generating ? "dim" : "text", label);
 		} else if (node.masked) {
 			markerColored = th.fg("error", marker);
 			labelColored = th.fg("dim", th.strikethrough(label));

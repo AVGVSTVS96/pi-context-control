@@ -44,6 +44,8 @@ export interface LeafInfo {
 	raw: number;
 	/** What the stub costs if this tool result is masked. */
 	stubTokens?: number;
+	/** Synthetic summary rows only: the digest, for the panel's detail view. */
+	summary?: { text: string; model: string };
 	timestamp: number;
 }
 

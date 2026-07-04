@@ -34,6 +34,8 @@ export interface TreeNode {
 	chain?: readonly string[];
 	/** Leaves: what kind of content this is (drives per-view affordances). */
 	kind?: LeafKind;
+	/** Summary rows: the full digest, viewable with enter. */
+	summary?: { text: string; model: string };
 }
 
 /**
@@ -82,6 +84,7 @@ function summaryLeaf(record: SummaryRecord, turnId: string): { info: LeafInfo; e
 			turnId,
 			label: summaryLabel(record),
 			raw: 0,
+			summary: record.pending ? undefined : { text: record.text, model: record.model },
 			timestamp: record.createdAt,
 		},
 		effective: appliedNow ? summaryTokens(record) : 0,
@@ -146,6 +149,7 @@ class TreeBuilder {
 			masked: forceMasked || this.state.anyMasked(leaf.chain),
 			chain: leaf.chain,
 			kind: leaf.kind,
+			summary: leaf.summary,
 		};
 		parent.children.push(node);
 		// Propagate tokens and counts up the group chain.

@@ -341,10 +341,15 @@ export default function contextControl(pi: ExtensionAPI): void {
 		// The same span again: re-apply the cached digest, no LLM call needed.
 		const existing = store.findBySpan(span);
 		if (existing) {
-			if (!existing.pending && !existing.active) {
+			if (existing.pending) {
+				ctx.ui.notify("already summarizing that range — the § row fills in when it's done", "info");
+			} else if (existing.active) {
+				ctx.ui.notify("that range is already summarized — <enter> on the § row shows the digest", "info");
+			} else {
 				store.activate(existing);
 				persist();
 				refresh(ctx);
+				ctx.ui.notify("re-applied the stored summary — no LLM call needed", "info");
 			}
 			return;
 		}
@@ -371,6 +376,10 @@ export default function contextControl(pi: ExtensionAPI): void {
 		};
 		store.add(record);
 		refresh(ctx); // shows the "generating…" row immediately
+		ctx.ui.notify(
+			`summarizing ${span.length} item${span.length === 1 ? "" : "s"} in the background — the § row fills in when done`,
+			"info",
+		);
 
 		const controller = new AbortController();
 		generations.set(record.id, controller);

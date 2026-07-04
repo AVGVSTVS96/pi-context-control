@@ -85,6 +85,9 @@ export class ContextPanel implements Focusable {
 	private anchorId: string | undefined;
 	/** One-shot footer message (cleared on the next key). */
 	private notice: string | undefined;
+	/** Summary row whose full digest is open in the detail view. */
+	private detailNode: TreeNode | undefined;
+	private detailScroll = 0;
 
 	private cacheStatus: CacheStatus = { hasSnapshot: false };
 	private impactMemo: { id: string; impact: ToggleImpact } | undefined;
@@ -126,6 +129,12 @@ export class ContextPanel implements Focusable {
 		}
 		this.selected[this.view] = Math.min(this.selected[this.view], Math.max(0, this.rows.length - 1));
 		if (this.anchorId && this.rowIndexOf(this.anchorId) < 0) this.anchorId = undefined;
+		// Keep an open detail view pointing at the fresh node (or close it if gone).
+		if (this.detailNode) {
+			const idx = this.rowIndexOf(this.detailNode.id);
+			this.detailNode = idx >= 0 ? this.rows[idx].node : undefined;
+			if (!this.detailNode?.summary) this.detailNode = undefined;
+		}
 		this.tui.requestRender();
 	}
 
@@ -167,10 +176,11 @@ export class ContextPanel implements Focusable {
 			const action = off ? "apply" : "restore";
 			const verb = delta < 0 ? `adds ~${formatCompact(-delta)}/call back` : `saves ~${formatCompact(delta)}/call`;
 			const rewritten = impact.extraRewrittenTokens;
-			if (!impact.hasCache) return `${action}: ${verb}`;
+			const view = " · <enter> view";
+			if (!impact.hasCache) return `${action}: ${verb}${view}`;
 			return rewritten > 0
-				? `${action}: ${verb} · rewrites ~${formatCompact(rewritten)} cached`
-				: `${action}: ${verb} · breaks no cache`;
+				? `${action}: ${verb} · rewrites ~${formatCompact(rewritten)} cached${view}`
+				: `${action}: ${verb} · breaks no cache${view}`;
 		}
 		const impact = this.impactFor(node);
 		const delta = impact.deltaPerCall;
@@ -274,6 +284,11 @@ export class ContextPanel implements Focusable {
 			this.tui.requestRender();
 			return;
 		}
+		if (this.detailNode) {
+			this.handleDetailInput(data);
+			this.tui.requestRender();
+			return;
+		}
 		this.handleTreeInput(data);
 		this.tui.requestRender();
 	}
@@ -335,6 +350,15 @@ export class ContextPanel implements Focusable {
 		} else if (matchesKey(data, "tab")) {
 			this.mode = this.mode === "effective" ? "raw" : "effective";
 		} else if (matchesKey(data, "right") || matchesKey(data, "return")) {
+			if (row?.node.kind === "summary") {
+				if (row.node.summary) {
+					this.detailNode = row.node;
+					this.detailScroll = 0;
+				} else {
+					this.notice = "still generating — <enter> shows the digest once it's done";
+				}
+				return;
+			}
 			if (row && !row.node.isLeaf) {
 				if (this.expanded.has(row.node.id)) {
 					if (matchesKey(data, "return")) this.expanded.delete(row.node.id);
@@ -392,6 +416,51 @@ export class ContextPanel implements Focusable {
 		}
 	}
 
+	/** Digest detail view: read-only, ↑↓ scroll, anything else backs out. */
+	private handleDetailInput(data: string): void {
+		if (matchesKey(data, "up")) {
+			this.detailScroll = Math.max(0, this.detailScroll - 1);
+			return;
+		}
+		if (matchesKey(data, "down")) {
+			this.detailScroll += 1; // clamped against the wrapped text in render()
+			return;
+		}
+		if (matchesKey(data, "ctrl+alt+c")) {
+			this.callbacks.onClose();
+			return;
+		}
+		if (matchesKey(data, "escape") || matchesKey(data, "return") || matchesKey(data, "left") || data === "q") {
+			this.detailNode = undefined;
+		}
+	}
+
+	/** Greedy word wrap, newlines preserved (digests are prose or bullets). */
+	private wrapText(text: string, width: number): string[] {
+		const out: string[] = [];
+		for (const raw of text.split("\n")) {
+			if (visibleWidth(raw) <= width) {
+				out.push(raw);
+				continue;
+			}
+			let line = "";
+			for (const word of raw.split(" ")) {
+				if (line && visibleWidth(`${line} ${word}`) > width) {
+					out.push(line);
+					line = word;
+				} else {
+					line = line ? `${line} ${word}` : word;
+				}
+				while (visibleWidth(line) > width) {
+					out.push(line.slice(0, width));
+					line = line.slice(width);
+				}
+			}
+			out.push(line);
+		}
+		return out;
+	}
+
 	private clampScroll(): void {
 		const visible = Math.min(BODY_MAX_ROWS, this.rows.length);
 		const sel = this.selected[this.view];
@@ -415,7 +484,9 @@ export class ContextPanel implements Focusable {
 		// Header
 		const title = this.presetMode
 			? "Context Token Usage — presets"
-			: `Context Token Usage (${this.mode} · ${this.view} view)`;
+			: this.detailNode
+				? "Context Token Usage — summary digest"
+				: `Context Token Usage (${this.mode} · ${this.view} view)`;
 		lines.push(boxRow(th.bold(th.fg("accent", title))));
 		const raw = this.model.rawTotal;
 		const effective = this.model.effectiveTotal;
@@ -444,7 +515,9 @@ export class ContextPanel implements Focusable {
 						? "typing in editor — /ctx or ctrl+alt+c to control the panel"
 						: this.presetMode
 							? "↑↓ move · ←→ adjust ‹value› · <enter> apply · <1-9> quick apply · <esc> back"
-							: this.anchorId
+							: this.detailNode
+								? "↑↓ scroll · <esc> back"
+								: this.anchorId
 								? "↑↓ extend range · <s> summarize selection · <esc> cancel"
 								: this.view === "session"
 									? "↑↓ move · <space> mask · <s> summarize · <tab> raw/eff · <v> view · <p> presets · <esc> close"
@@ -455,7 +528,7 @@ export class ContextPanel implements Focusable {
 		// Pending cache break: masks changed since the last call take effect (and
 		// break the cache once, at the earliest change) on the next call.
 		const pending = this.cacheStatus.pending;
-		if (pending && !this.presetMode) {
+		if (pending && !this.presetMode && !this.detailNode) {
 			const cached = this.cacheStatus.actualCached;
 			const note =
 				`⚡ pending: cache breaks at ${pending.where} · ` +
@@ -471,6 +544,28 @@ export class ContextPanel implements Focusable {
 				lines.push(this.renderPresetRow(i, i === this.presetSelected, innerW));
 			}
 			lines.push(boxRow(th.fg("dim", `(${this.presetSelected + 1}/${this.presets.length})`)));
+			lines.push(th.fg("border", `╰${"─".repeat(innerW)}╯`));
+			return lines;
+		}
+		if (this.detailNode?.summary) {
+			const node = this.detailNode;
+			const summary = this.detailNode.summary;
+			const status = node.masked ? "switched off" : node.effectiveTokens > 0 ? "applied" : "";
+			lines.push(
+				boxRow(
+					th.fg("muted", "generated by ") +
+						th.fg("text", summary.model) +
+						(status ? th.fg("muted", " · ") + th.fg(node.masked ? "warning" : "success", status) : ""),
+				),
+			);
+			const wrapped = this.wrapText(summary.text, innerW - 4);
+			const visibleText = Math.min(BODY_MAX_ROWS, wrapped.length);
+			this.detailScroll = Math.max(0, Math.min(this.detailScroll, wrapped.length - visibleText));
+			for (let i = this.detailScroll; i < this.detailScroll + visibleText; i++) {
+				lines.push(boxRow(` ${th.fg("text", wrapped[i])}`));
+			}
+			const at = wrapped.length > visibleText ? ` (${this.detailScroll + visibleText}/${wrapped.length} lines)` : "";
+			lines.push(boxRow(th.fg("dim", `§ ${node.label}${at}`.slice(0, innerW - 2))));
 			lines.push(th.fg("border", `╰${"─".repeat(innerW)}╯`));
 			return lines;
 		}

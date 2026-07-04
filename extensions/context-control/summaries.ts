@@ -50,6 +50,12 @@ export function summaryTokens(record: SummaryRecord): number {
 	return record.pending ? 0 : estimateChars(summaryText(record));
 }
 
+/** Records that actually take effect: active, generated, and whole span still present. */
+export function applicableRecords(records: readonly SummaryRecord[], idx: LeafIndex): SummaryRecord[] {
+	const present = new Set(idx.leaves.map((l) => l.id));
+	return records.filter((r) => r.active && !r.pending && r.leafIds.every((id) => present.has(id)));
+}
+
 export class SummaryStore {
 	private records: SummaryRecord[] = [];
 
@@ -69,10 +75,8 @@ export class SummaryStore {
 		this.records = this.records.filter((r) => r.id !== id);
 	}
 
-	/** Records to actually apply: active, generated, and whole span still present. */
 	applicable(idx: LeafIndex): SummaryRecord[] {
-		const present = new Set(idx.leaves.map((l) => l.id));
-		return this.records.filter((r) => r.active && !r.pending && r.leafIds.every((id) => present.has(id)));
+		return applicableRecords(this.records, idx);
 	}
 
 	/**
@@ -83,17 +87,6 @@ export class SummaryStore {
 	visible(idx: LeafIndex): SummaryRecord[] {
 		const present = new Set(idx.leaves.map((l) => l.id));
 		return this.records.filter((r) => r.pending || r.leafIds.every((id) => present.has(id)));
-	}
-
-	/** Activate a record, switching off any other active record sharing a leaf. */
-	activate(record: SummaryRecord): void {
-		const span = new Set(record.leafIds);
-		for (const other of this.records) {
-			if (other !== record && other.active && other.leafIds.some((id) => span.has(id))) {
-				other.active = false;
-			}
-		}
-		record.active = true;
 	}
 
 	/** An existing record covering exactly this span (order-insensitive). */

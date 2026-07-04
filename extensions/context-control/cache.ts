@@ -12,12 +12,12 @@
  * We snapshot the outgoing leaf stream on every `context` event — that is
  * precisely what the provider cached — and diff the would-send stream
  * against it to find the earliest break point, price pending changes, and
- * preview the marginal impact of toggling any node.
+ * preview the marginal impact of any plan edit (editImpact).
  */
 
 import { droppedCallIds, type LeafIndex } from "./leaves.ts";
-import { type MaskableNode, MaskState, toggleNodeMask } from "./masking.ts";
-import { type SummaryRecord, summaryNodeId, summaryTokens } from "./summaries.ts";
+import { clonePlan, type PlanEdit, type SendPlan } from "./plan.ts";
+import { applicableRecords, type SummaryRecord, summaryNodeId, summaryTokens } from "./summaries.ts";
 
 /** Cache pricing relative to plain input tokens, from the model's cost table. */
 export interface CacheCosts {
@@ -58,11 +58,12 @@ export interface SentSnapshot extends SentStream {
 	actualPrompt?: number;
 }
 
-/** Mirror of applyMask + applySummaries: which items go out, and at what (estimated) size. */
-export function sentStream(idx: LeafIndex, state: MaskState, summaries: readonly SummaryRecord[] = []): SentStream {
+/** Mirror of applyPlan: which items go out, and at what (estimated) size. */
+export function sentStream(idx: LeafIndex, plan: SendPlan): SentStream {
+	const state = plan.masks;
 	const dropped = droppedCallIds(idx, state);
 	const covered = new Map<string, SummaryRecord>();
-	for (const r of summaries) for (const id of r.leafIds) covered.set(id, r);
+	for (const r of applicableRecords(plan.summaries, idx)) for (const id of r.leafIds) covered.set(id, r);
 	const injected = new Set<string>();
 	const ids: string[] = [];
 	const tokens: number[] = [];
@@ -145,10 +146,10 @@ export function diffAgainstSnapshot(current: SentStream, snap: SentSnapshot | un
 	return { breakLeafId: snap.ids[i], brokenTokens: broken, rewrittenTokens: rewritten };
 }
 
-export interface ToggleImpact {
-	/** Tokens this toggle saves on every future call (>0) or adds back (<0). */
+export interface Impact {
+	/** Tokens this edit saves on every future call (>0) or adds back (<0). */
 	deltaPerCall: number;
-	/** Cached tokens newly invalidated by this toggle, beyond already-pending changes. */
+	/** Cached tokens newly invalidated by this edit, beyond already-pending changes. */
 	extraBrokenTokens: number;
 	/** Cached tokens newly re-written next call, beyond already-pending changes. */
 	extraRewrittenTokens: number;
@@ -158,33 +159,20 @@ export interface ToggleImpact {
 	hasCache: boolean;
 }
 
-/** Preview a mask toggle without touching real state: clone, toggle, diff both streams. */
-export function toggleImpact(
-	node: MaskableNode,
+/**
+ * Price a plan edit without committing it: run the SAME edit the keypress
+ * would run against a clone, and diff both streams against the snapshot.
+ */
+export function editImpact(
 	idx: LeafIndex,
-	state: MaskState,
+	plan: SendPlan,
+	edit: PlanEdit,
 	snap: SentSnapshot | undefined,
 	costs: CacheCosts = DEFAULT_CACHE_COSTS,
-	summaries: readonly SummaryRecord[] = [],
-): ToggleImpact {
-	const sim = new MaskState();
-	sim.load(state.toJSON());
-	toggleNodeMask(sim, node, idx.leaves);
-	return impactFromStreams(sentStream(idx, state, summaries), sentStream(idx, sim, summaries), snap, costs);
-}
-
-/** Preview applying/restoring a summary: same math, toggling the record instead of a mask. */
-export function summaryToggleImpact(
-	record: SummaryRecord,
-	idx: LeafIndex,
-	state: MaskState,
-	summaries: readonly SummaryRecord[],
-	snap: SentSnapshot | undefined,
-	costs: CacheCosts = DEFAULT_CACHE_COSTS,
-): ToggleImpact {
-	const applied = summaries.some((r) => r.id === record.id);
-	const toggled = applied ? summaries.filter((r) => r.id !== record.id) : [...summaries, record];
-	return impactFromStreams(sentStream(idx, state, summaries), sentStream(idx, state, toggled), snap, costs);
+): Impact {
+	const draft = clonePlan(plan);
+	edit(draft);
+	return impactFromStreams(sentStream(idx, plan), sentStream(idx, draft), snap, costs);
 }
 
 function impactFromStreams(
@@ -192,7 +180,7 @@ function impactFromStreams(
 	after: SentStream,
 	snap: SentSnapshot | undefined,
 	costs: CacheCosts,
-): ToggleImpact {
+): Impact {
 	const baseline = diffAgainstSnapshot(before, snap);
 	const toggled = diffAgainstSnapshot(after, snap);
 

@@ -13,7 +13,7 @@
 
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { type Focusable, matchesKey, type TUI, visibleWidth } from "@earendil-works/pi-tui";
-import type { ToggleImpact } from "./cache.ts";
+import type { Impact } from "./cache.ts";
 import { formatCompact, formatExact } from "./estimate.ts";
 import type { Preset } from "./presets.ts";
 import type { ContextTreeModel, TreeNode } from "./tree.ts";
@@ -43,8 +43,10 @@ export interface PanelCallbacks {
 	onToggleMask: (node: TreeNode) => void;
 	/** Summarize the selected row range (session view); caller validates and generates. */
 	onSummarize: (nodes: TreeNode[]) => void;
-	/** Preview what toggling this node would do to per-call cost and the cache. */
-	onImpact: (node: TreeNode) => ToggleImpact;
+	/** Preview what space on this node would do to per-call cost and the cache. */
+	onImpact: (node: TreeNode) => Impact;
+	/** Preview what summarizing this row range would do (shown while selecting). */
+	onSpanImpact: (nodes: TreeNode[]) => Impact;
 	/** Apply a mask preset with its current value; caller rebuilds and calls setModels(). */
 	onPreset: (preset: Preset, value: number | undefined) => void;
 	/** Persist tuned preset values. */
@@ -90,7 +92,7 @@ export class ContextPanel implements Focusable {
 	private detailScroll = 0;
 
 	private cacheStatus: CacheStatus = { hasSnapshot: false };
-	private impactMemo: { id: string; impact: ToggleImpact } | undefined;
+	private impactMemo: { key: string; impact: Impact } | undefined;
 
 	private tui: TUI;
 	private theme: Theme;
@@ -157,9 +159,18 @@ export class ContextPanel implements Focusable {
 		this.tui.requestRender();
 	}
 
-	private impactFor(node: TreeNode): ToggleImpact {
-		if (this.impactMemo?.id !== node.id) {
-			this.impactMemo = { id: node.id, impact: this.callbacks.onImpact(node) };
+	private impactFor(node: TreeNode): Impact {
+		if (this.impactMemo?.key !== node.id) {
+			this.impactMemo = { key: node.id, impact: this.callbacks.onImpact(node) };
+		}
+		return this.impactMemo.impact;
+	}
+
+	private spanImpactFor(range: [number, number]): Impact {
+		const key = `span:${this.view}:${range[0]}-${range[1]}`;
+		if (this.impactMemo?.key !== key) {
+			const nodes = this.rows.slice(range[0], range[1] + 1).map((r) => r.node);
+			this.impactMemo = { key, impact: this.callbacks.onSpanImpact(nodes) };
 		}
 		return this.impactMemo.impact;
 	}
@@ -594,7 +605,13 @@ export class ContextPanel implements Focusable {
 		if (this.notice) info = this.notice;
 		else if (range) {
 			const stats = this.rangeStats(range);
-			info = `summarize: ~${formatCompact(stats.tokens)} across ${stats.items} item${stats.items === 1 ? "" : "s"} — <s> to confirm`;
+			const impact = this.spanImpactFor(range);
+			const cache = !impact.hasCache
+				? ""
+				: impact.extraRewrittenTokens > 0
+					? ` · rewrites ~${formatCompact(impact.extraRewrittenTokens)} cached`
+					: " · breaks no cache";
+			info = `summarize: ~${formatCompact(stats.tokens)} across ${stats.items} item${stats.items === 1 ? "" : "s"}${cache} — <s> to confirm`;
 		} else if (selectedRow && this.focused) {
 			info = this.impactText(selectedRow.node);
 		}

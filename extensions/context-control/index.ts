@@ -19,22 +19,23 @@ import {
 	type Theme,
 } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey } from "@earendil-works/pi-tui";
-import {
-	cacheCosts,
-	diffAgainstSnapshot,
-	type SentSnapshot,
-	sentStream,
-	summaryToggleImpact,
-	toggleImpact,
-} from "./cache.ts";
+import { cacheCosts, diffAgainstSnapshot, editImpact, type Impact, type SentSnapshot, sentStream } from "./cache.ts";
 import { formatCompact } from "./estimate.ts";
 import type { AnyMessage } from "./keys.ts";
 import { indexLeaves, type LeafIndex, maskedLeafCount, pruneStaleMasks } from "./leaves.ts";
-import { applyMask, MaskState, toggleNodeMask } from "./masking.ts";
+import { MaskState } from "./masking.ts";
 import { type CacheStatus, ContextPanel, type ViewMode } from "./panel.ts";
+import {
+	applyPlan,
+	type PlanEdit,
+	type SendPlan,
+	sendPlan,
+	summarizeSpanEdit,
+	toggleNodeEdit,
+	toggleSummaryEdit,
+} from "./plan.ts";
 import { type Preset, PRESETS, toPreset, type UserPresetConfig } from "./presets.ts";
 import {
-	applySummaries,
 	canonicalSpan,
 	generateSpanSummary,
 	parseModelSpec,
@@ -105,6 +106,29 @@ export default function contextControl(pi: ExtensionAPI): void {
 		return indexLeaves(contextMessages(ctx));
 	}
 
+	/** The live plan: edits run against it take effect immediately. */
+	function livePlan(): SendPlan {
+		return sendPlan(state, [...store.all]);
+	}
+
+	/** Commit a user action: the same edit the panel priced, run for real. */
+	function commit(ctx: ExtensionContext, edit: PlanEdit): void {
+		edit(livePlan());
+		persist();
+		refresh(ctx);
+	}
+
+	/** Price a user action before it happens — identical edit, cloned plan. */
+	function previewImpact(ctx: ExtensionContext, editOf: (idx: LeafIndex) => PlanEdit): Impact {
+		const idx = contextIndex(ctx);
+		return editImpact(idx, livePlan(), editOf(idx), lastSent, cacheCosts(ctx.model));
+	}
+
+	/** What space does on a row — shared by the commit and its footer preview. */
+	function editFor(node: TreeNode, idx: LeafIndex): PlanEdit {
+		return node.id.startsWith("sum:") ? toggleSummaryEdit(node.id.slice(4)) : toggleNodeEdit(node, idx.leaves);
+	}
+
 	function buildModels(idx: LeafIndex): Record<ViewMode, ContextTreeModel> {
 		const records = store.visible(idx);
 		return { general: buildTree(idx, state, records), session: buildSessionTree(idx, state, records) };
@@ -157,7 +181,7 @@ export default function contextControl(pi: ExtensionAPI): void {
 
 	/** Diff what we would send now against what the last call cached. */
 	function cacheStatus(idx: LeafIndex): CacheStatus {
-		const brk = diffAgainstSnapshot(sentStream(idx, state, store.applicable(idx)), lastSent);
+		const brk = diffAgainstSnapshot(sentStream(idx, livePlan()), lastSent);
 		const status: CacheStatus = {
 			hasSnapshot: (lastSent?.ids.length ?? 0) > 0,
 			actualCached: lastSent?.actualPrompt,
@@ -217,12 +241,10 @@ export default function contextControl(pi: ExtensionAPI): void {
 	pi.on("context", async (event) => {
 		const messages = event.messages as AnyMessage[];
 		const idx = indexLeaves(messages);
-		const active = store.applicable(idx);
-		lastSent = sentStream(idx, state, active);
-		if (state.size === 0 && active.length === 0) return;
-		let out = messages;
-		if (state.size > 0) out = applyMask(out, state);
-		if (active.length > 0) out = applySummaries(out, active);
+		const plan = livePlan();
+		lastSent = sentStream(idx, plan);
+		const out = applyPlan(messages, idx, plan);
+		if (out === messages) return;
 		return { messages: out as typeof event.messages };
 	});
 
@@ -274,60 +296,11 @@ export default function contextControl(pi: ExtensionAPI): void {
 		return ctx.model;
 	}
 
-	/** Space on a summary row: cancel if generating, otherwise apply/restore the swap. */
-	function toggleSummary(ctx: ExtensionContext, recordId: string): void {
-		const record = store.get(recordId);
-		if (!record) return;
-		if (record.pending) {
-			generations.get(record.id)?.abort();
-			generations.delete(record.id);
-			store.remove(record.id);
-		} else {
-			if (record.active) record.active = false;
-			else store.activate(record); // switches off any overlapping record
-			persist();
-		}
-		refresh(ctx);
-	}
-
-	/** Applied summaries anywhere under a tree node. */
-	function appliedSummariesUnder(node: TreeNode): SummaryRecord[] {
-		const out: SummaryRecord[] = [];
-		const visit = (n: TreeNode) => {
-			if (n.id.startsWith("sum:")) {
-				const record = store.get(n.id.slice(4));
-				if (record?.active && !record.pending) out.push(record);
-				return;
-			}
-			for (const child of n.children) visit(child);
-		};
-		visit(node);
-		return out;
-	}
-
-	/** Any real (non-summary) content under the node hidden by masks. */
-	function hasMaskedContent(node: TreeNode): boolean {
-		if (node.kind === "summary") return false;
-		if (node.isLeaf) return node.masked;
-		return state.has(node.id) || node.children.some(hasMaskedContent);
-	}
-
-	/**
-	 * Space on a non-summary node. Same two-state cycle as plain masking, but
-	 * an applied summary under the node counts as hidden content: the first
-	 * press brings everything back (restore summaries + clear masks), the
-	 * next press masks the whole node. Summaries are only switched off, never
-	 * discarded.
-	 */
-	function toggleNode(ctx: ExtensionContext, node: TreeNode): void {
-		const applied = appliedSummariesUnder(node);
-		if (applied.length > 0) {
-			for (const record of applied) record.active = false;
-			if (hasMaskedContent(node)) toggleNodeMask(state, node, contextIndex(ctx).leaves);
-		} else {
-			toggleNodeMask(state, node, contextIndex(ctx).leaves);
-		}
-		persist();
+	/** Space on a generating row cancels it — record lifecycle, not a plan edit. */
+	function cancelGeneration(ctx: ExtensionContext, record: SummaryRecord): void {
+		generations.get(record.id)?.abort();
+		generations.delete(record.id);
+		store.remove(record.id);
 		refresh(ctx);
 	}
 
@@ -346,9 +319,7 @@ export default function contextControl(pi: ExtensionAPI): void {
 			} else if (existing.active) {
 				ctx.ui.notify("that range is already summarized — <enter> on the § row shows the digest", "info");
 			} else {
-				store.activate(existing);
-				persist();
-				refresh(ctx);
+				commit(ctx, toggleSummaryEdit(existing.id));
 				ctx.ui.notify("re-applied the stored summary — no LLM call needed", "info");
 			}
 			return;
@@ -429,28 +400,13 @@ export default function contextControl(pi: ExtensionAPI): void {
 			(tui, theme) => {
 				panel = new ContextPanel(tui, theme, buildModels(contextIndex(ctx)), allPresets, presetValues, {
 					onToggleMask: (node) => {
-						if (node.id.startsWith("sum:")) toggleSummary(ctx, node.id.slice(4));
-						else toggleNode(ctx, node);
+						const record = node.id.startsWith("sum:") ? store.get(node.id.slice(4)) : undefined;
+						if (record?.pending) cancelGeneration(ctx, record);
+						else commit(ctx, editFor(node, contextIndex(ctx)));
 					},
 					onSummarize: (nodes) => void summarizeSpan(ctx, nodes),
-					onImpact: (node) => {
-						const idx = contextIndex(ctx);
-						const active = store.applicable(idx);
-						const costs = cacheCosts(ctx.model);
-						if (node.id.startsWith("sum:")) {
-							const record = store.get(node.id.slice(4));
-							if (record && !record.pending) {
-								return summaryToggleImpact(record, idx, state, active, lastSent, costs);
-							}
-							return {
-								deltaPerCall: 0,
-								extraBrokenTokens: 0,
-								extraRewrittenTokens: 0,
-								hasCache: (lastSent?.ids.length ?? 0) > 0,
-							};
-						}
-						return toggleImpact(node, idx, state, lastSent, costs, active);
-					},
+					onImpact: (node) => previewImpact(ctx, (idx) => editFor(node, idx)),
+					onSpanImpact: (nodes) => previewImpact(ctx, (idx) => summarizeSpanEdit(canonicalSpan(spanLeafIds(nodes), idx))),
 					onPreset: (preset, value) => {
 						if (preset.apply(state, contextIndex(ctx), value) > 0) persist();
 						refresh(ctx);

@@ -10,7 +10,8 @@
         "LICENSE"
     ],
     "scripts": {
-        "typecheck": "tsc --noEmit"
+        "typecheck": "tsc --noEmit",
+        "test": "tsx test/logic.test.ts && tsx test/panel.test.ts"
     },
     "keywords": [
         "pi-package"
@@ -26,6 +27,7 @@
         "@earendil-works/pi-tui": "*"
     },
     "devDependencies": {
+        "tsx": "^4.0.0",
         "typescript": "^5.0.0"
     }
 }

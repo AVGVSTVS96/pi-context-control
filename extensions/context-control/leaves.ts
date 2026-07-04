@@ -162,12 +162,15 @@ export function indexLeaves(messages: AnyMessage[]): LeafIndex {
 						});
 					} else if (block.type === "thinking") {
 						const chain = chains.reasoning(m, turnId);
+						// Reasoning models can return only an encrypted payload (replayed
+						// to the provider, unreadable here) with no visible text.
+						const text = firstLine(block.thinking ?? "");
 						leaves.push({
 							id: chain[chain.length - 1],
 							kind: "reasoning",
 							chain,
 							turnId,
-							label: firstLine(block.thinking ?? ""),
+							label: text || (block.thinkingSignature ? "(encrypted)" : ""),
 							raw: estimateThinkingBlock(block),
 							timestamp: ts,
 						});

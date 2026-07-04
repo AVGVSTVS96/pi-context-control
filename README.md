@@ -107,7 +107,7 @@ A compact `ctx 6.3K/16.5K (38%)` status is also published to the footer (visible
 | turn (session view) | Whole section removed: calls drop and their results drop with them |
 | summarized span | All covered items drop; one digest message is injected where the span began. Call/result pairs always travel together |
 
-Token counts are estimates (chars/4, matching pi's own estimator, plus a correction for encrypted thinking signatures which cost ~chars, not chars/4).
+Token counts are estimates (chars/4, matching pi's own estimator, plus a correction for encrypted thinking signatures which cost ~chars, not chars/4). Reasoning that arrives only as an encrypted payload (no visible text) is labeled `reasoning · (encrypted)`.
 
 ## Install
 

@@ -19,42 +19,75 @@ import {
 	type Theme,
 } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey } from "@earendil-works/pi-tui";
-import { cacheCosts, diffAgainstSnapshot, type SentSnapshot, sentStream, toggleImpact } from "./cache.ts";
+import {
+	cacheCosts,
+	diffAgainstSnapshot,
+	type SentSnapshot,
+	sentStream,
+	summaryToggleImpact,
+	toggleImpact,
+} from "./cache.ts";
 import { formatCompact } from "./estimate.ts";
 import type { AnyMessage } from "./keys.ts";
 import { indexLeaves, type LeafIndex, maskedLeafCount, pruneStaleMasks } from "./leaves.ts";
 import { applyMask, MaskState, toggleNodeMask } from "./masking.ts";
 import { type CacheStatus, ContextPanel, type ViewMode } from "./panel.ts";
 import { type Preset, PRESETS, toPreset, type UserPresetConfig } from "./presets.ts";
-import { buildSessionTree, buildTree, type ContextTreeModel } from "./tree.ts";
+import {
+	applySummaries,
+	canonicalSpan,
+	generateSpanSummary,
+	parseModelSpec,
+	spanLeafIds,
+	type SummaryRecord,
+	SummaryStore,
+	spanMessages,
+} from "./summaries.ts";
+import { buildSessionTree, buildTree, type ContextTreeModel, type TreeNode } from "./tree.ts";
 
 const CUSTOM_TYPE = "context-control";
 const PANEL_KEY = "context-control:panel";
+const SUMMARIZE_MODEL_ENV = "PI_CONTEXT_CONTROL_SUMMARIZE_MODEL";
 
 interface PersistedState {
 	masked?: string[];
 	presetValues?: Record<string, number>;
+	summaries?: SummaryRecord[];
 }
 
-/** User-defined presets from .pi/context-control.json (project) and ~/.pi/context-control.json. */
-function loadUserPresets(cwd: string): Preset[] {
-	const presets: Preset[] = [];
+interface UserConfig {
+	presets: Preset[];
+	/** "provider/model-id" to summarize with (project file wins over global). */
+	summarizeModel?: string;
+}
+
+/** User config from .pi/context-control.json (project) and ~/.pi/context-control.json. */
+function loadUserConfig(cwd: string): UserConfig {
+	const config: UserConfig = { presets: [] };
 	for (const file of [join(homedir(), ".pi", "context-control.json"), join(cwd, ".pi", "context-control.json")]) {
 		if (!existsSync(file)) continue;
 		try {
-			const parsed = JSON.parse(readFileSync(file, "utf8")) as { presets?: UserPresetConfig[] };
+			const parsed = JSON.parse(readFileSync(file, "utf8")) as {
+				presets?: UserPresetConfig[];
+				summarizeModel?: string;
+			};
 			for (const cfg of parsed.presets ?? []) {
-				if (typeof cfg?.label === "string") presets.push(toPreset(cfg, presets.length));
+				if (typeof cfg?.label === "string") config.presets.push(toPreset(cfg, config.presets.length));
 			}
+			if (typeof parsed.summarizeModel === "string") config.summarizeModel = parsed.summarizeModel;
 		} catch {
 			// Malformed config: skip silently rather than break the session.
 		}
 	}
-	return presets;
+	return config;
 }
 
 export default function contextControl(pi: ExtensionAPI): void {
 	const state = new MaskState();
+	const store = new SummaryStore();
+	/** In-flight summary generations by record id, so they can be cancelled. */
+	const generations = new Map<string, AbortController>();
+	let summarizeModelSpec: string | undefined;
 	let presetValues: Record<string, number> = {};
 	let allPresets: Preset[] = PRESETS;
 	let panel: ContextPanel | undefined;
@@ -73,7 +106,8 @@ export default function contextControl(pi: ExtensionAPI): void {
 	}
 
 	function buildModels(idx: LeafIndex): Record<ViewMode, ContextTreeModel> {
-		return { general: buildTree(idx, state), session: buildSessionTree(idx, state) };
+		const records = store.visible(idx);
+		return { general: buildTree(idx, state, records), session: buildSessionTree(idx, state, records) };
 	}
 
 	/** Compact footer readout: "ctx 6.0K/16.5K (36%)" when masking, "ctx 16.5K" otherwise. */
@@ -87,8 +121,14 @@ export default function contextControl(pi: ExtensionAPI): void {
 		return theme.fg("dim", `ctx ${formatCompact(raw)}`);
 	}
 
-	/** One-line widget below the editor while masks hide something or a cache break is pending. */
-	function widgetLine(theme: Theme, model: ContextTreeModel, maskedItems: number, cache: CacheStatus): string {
+	/** One-line widget below the editor while masks/summaries change what is sent. */
+	function widgetLine(
+		theme: Theme,
+		model: ContextTreeModel,
+		maskedItems: number,
+		summarized: number,
+		cache: CacheStatus,
+	): string {
 		const raw = model.rawTotal;
 		const effective = model.effectiveTotal;
 		const pct = raw > 0 ? Math.round((effective / raw) * 100) : 100;
@@ -96,6 +136,7 @@ export default function contextControl(pi: ExtensionAPI): void {
 			theme.fg("warning", " ◐ context-control ") +
 			theme.fg("text", `${formatCompact(effective)} of ${formatCompact(raw)} sent (${pct}%)`) +
 			(maskedItems > 0 ? theme.fg("muted", ` · ${maskedItems} item${maskedItems === 1 ? "" : "s"} masked`) : "") +
+			(summarized > 0 ? theme.fg("muted", ` · ${summarized} span${summarized === 1 ? "" : "s"} summarized`) : "") +
 			(cache.pending
 				? theme.fg("warning", ` · next call rewrites ~${formatCompact(cache.pending.rewrittenTokens)} cache`)
 				: "") +
@@ -116,16 +157,20 @@ export default function contextControl(pi: ExtensionAPI): void {
 
 	/** Diff what we would send now against what the last call cached. */
 	function cacheStatus(idx: LeafIndex): CacheStatus {
-		const brk = diffAgainstSnapshot(sentStream(idx, state), lastSent);
+		const brk = diffAgainstSnapshot(sentStream(idx, state, store.applicable(idx)), lastSent);
 		const status: CacheStatus = {
 			hasSnapshot: (lastSent?.ids.length ?? 0) > 0,
 			actualCached: lastSent?.actualPrompt,
 		};
 		if (brk.breakLeafId) {
-			const leaf = idx.leaves.find((l) => l.id === brk.breakLeafId);
+			// A digest in the cached stream locates at its span's first leaf.
+			const leafId = brk.breakLeafId.startsWith("sum:")
+				? (store.get(brk.breakLeafId.slice(4))?.leafIds[0] ?? brk.breakLeafId)
+				: brk.breakLeafId;
+			const leaf = idx.leaves.find((l) => l.id === leafId);
 			const turnIndex = leaf ? idx.turns.findIndex((t) => t.id === leaf.turnId) : -1;
 			status.pending = {
-				breakLeafId: brk.breakLeafId,
+				breakLeafId: leafId,
 				brokenTokens: brk.brokenTokens,
 				rewrittenTokens: brk.rewrittenTokens,
 				where: turnIndex >= 0 ? `turn ${turnIndex + 1}` : "earlier content",
@@ -146,28 +191,39 @@ export default function contextControl(pi: ExtensionAPI): void {
 		// Count what the masks actually hide, not raw mask ids: an armed group
 		// rule with no matching content yet should not claim anything is masked.
 		const maskedItems = maskedLeafCount(state, idx);
+		const summarized = store.applicable(idx).length;
 		ctx.ui.setStatus("context-control", statusText(ctx.ui.theme, models.general));
 		ctx.ui.setWidget(
 			"context-control",
-			maskedItems > 0 || cache.pending
-				? [widgetLine(ctx.ui.theme, models.general, maskedItems, cache)]
+			maskedItems > 0 || summarized > 0 || cache.pending
+				? [widgetLine(ctx.ui.theme, models.general, maskedItems, summarized, cache)]
 				: undefined,
 			{ placement: "belowEditor" },
 		);
 	}
 
 	function persist(): void {
-		pi.appendEntry(CUSTOM_TYPE, { masked: state.toJSON(), presetValues } satisfies PersistedState);
+		pi.appendEntry(CUSTOM_TYPE, {
+			masked: state.toJSON(),
+			presetValues,
+			summaries: store.toJSON(),
+		} satisfies PersistedState);
 	}
 
-	// The masking hook: filter/rewrite the outgoing messages on every LLM call.
-	// Also the cache bookkeeping moment: what goes out on this call is exactly
+	// The transform hook: filter/rewrite the outgoing messages on every LLM
+	// call — masks first, then summarized spans swap for their digests. Also
+	// the cache bookkeeping moment: what goes out on this call is exactly
 	// what the provider will have cached when the next one is planned.
 	pi.on("context", async (event) => {
 		const messages = event.messages as AnyMessage[];
-		lastSent = sentStream(indexLeaves(messages), state);
-		if (state.size === 0) return;
-		return { messages: applyMask(messages, state) as typeof event.messages };
+		const idx = indexLeaves(messages);
+		const active = store.applicable(idx);
+		lastSent = sentStream(idx, state, active);
+		if (state.size === 0 && active.length === 0) return;
+		let out = messages;
+		if (state.size > 0) out = applyMask(out, state);
+		if (active.length > 0) out = applySummaries(out, active);
+		return { messages: out as typeof event.messages };
 	});
 
 	// Restore persisted state; close any panel left over from a previous session.
@@ -180,13 +236,19 @@ export default function contextControl(pi: ExtensionAPI): void {
 			}
 		}
 		state.load(saved?.masked);
+		store.load(saved?.summaries);
 		presetValues = saved?.presetValues ?? {};
-		if (pruneStaleMasks(state, contextIndex(ctx)) > 0) persist();
-		allPresets = [...PRESETS, ...loadUserPresets(ctx.cwd)];
+		const idx = contextIndex(ctx);
+		if (pruneStaleMasks(state, idx) + store.prune(idx) > 0) persist();
+		const config = loadUserConfig(ctx.cwd);
+		allPresets = [...PRESETS, ...config.presets];
+		summarizeModelSpec = config.summarizeModel;
 		refresh(ctx);
 	});
 
 	pi.on("session_shutdown", async () => {
+		for (const controller of generations.values()) controller.abort();
+		generations.clear();
 		closePanel?.();
 	});
 
@@ -198,6 +260,104 @@ export default function contextControl(pi: ExtensionAPI): void {
 	function setPanelFocus(focused: boolean): void {
 		panelFocused = focused;
 		if (panel) panel.focused = focused;
+	}
+
+	/** Env var beats config beats the session's own model. */
+	function resolveSummarizer(ctx: ExtensionContext): ExtensionContext["model"] {
+		const spec = process.env[SUMMARIZE_MODEL_ENV] || summarizeModelSpec;
+		if (spec) {
+			const parsed = parseModelSpec(spec);
+			const found = parsed && ctx.modelRegistry.find(parsed.provider, parsed.id);
+			if (found) return found;
+			ctx.ui.notify(`summarize model "${spec}" not found — using the session model`, "warning");
+		}
+		return ctx.model;
+	}
+
+	/** Space on a summary row: cancel if generating, otherwise apply/restore the swap. */
+	function toggleSummary(ctx: ExtensionContext, recordId: string): void {
+		const record = store.get(recordId);
+		if (!record) return;
+		if (record.pending) {
+			generations.get(record.id)?.abort();
+			generations.delete(record.id);
+			store.remove(record.id);
+		} else {
+			record.active = !record.active;
+			persist();
+		}
+		refresh(ctx);
+	}
+
+	async function summarizeSpan(ctx: ExtensionContext, nodes: TreeNode[]): Promise<void> {
+		const requested = spanLeafIds(nodes);
+		if (!requested) {
+			ctx.ui.notify("range includes an existing summary — restore it first (space)", "warning");
+			return;
+		}
+		const span = canonicalSpan(requested, contextIndex(ctx));
+		if (span.length === 0) return;
+
+		// The same span again: re-apply the cached digest, no LLM call needed.
+		const existing = store.findBySpan(span);
+		if (existing) {
+			if (!existing.pending && !existing.active) {
+				existing.active = true;
+				persist();
+				refresh(ctx);
+			}
+			return;
+		}
+
+		const model = resolveSummarizer(ctx);
+		if (!model) {
+			ctx.ui.notify("no model available to summarize with", "error");
+			return;
+		}
+		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+		if (!auth.ok) {
+			ctx.ui.notify(`can't authenticate ${model.provider}: ${auth.error}`, "error");
+			return;
+		}
+
+		const record: SummaryRecord = {
+			id: Math.random().toString(36).slice(2, 10),
+			leafIds: span,
+			text: "",
+			model: `${model.provider}/${model.id}`,
+			active: false,
+			pending: true,
+			createdAt: Date.now(),
+		};
+		store.add(record);
+		refresh(ctx); // shows the "generating…" row immediately
+
+		const controller = new AbortController();
+		generations.set(record.id, controller);
+		try {
+			const excerpt = spanMessages(contextMessages(ctx), new Set(span));
+			const text = await generateSpanSummary(
+				excerpt,
+				model,
+				{ apiKey: auth.apiKey, headers: auth.headers, env: auth.env },
+				controller.signal,
+			);
+			if (!store.get(record.id)) return; // cancelled while generating
+			store.removeOverlapping(span, record.id); // a re-summarize replaces old spans
+			record.text = text;
+			record.pending = false;
+			record.active = true;
+			persist();
+			refresh(ctx);
+		} catch (err) {
+			if (store.get(record.id)) {
+				store.remove(record.id);
+				refresh(ctx);
+				ctx.ui.notify(`summarization failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+			}
+		} finally {
+			generations.delete(record.id);
+		}
 	}
 
 	async function openPanel(ctx: ExtensionContext): Promise<void> {
@@ -220,11 +380,33 @@ export default function contextControl(pi: ExtensionAPI): void {
 			(tui, theme) => {
 				panel = new ContextPanel(tui, theme, buildModels(contextIndex(ctx)), allPresets, presetValues, {
 					onToggleMask: (node) => {
+						if (node.id.startsWith("sum:")) {
+							toggleSummary(ctx, node.id.slice(4));
+							return;
+						}
 						toggleNodeMask(state, node, contextIndex(ctx).leaves);
 						persist();
 						refresh(ctx);
 					},
-					onImpact: (node) => toggleImpact(node, contextIndex(ctx), state, lastSent, cacheCosts(ctx.model)),
+					onSummarize: (nodes) => void summarizeSpan(ctx, nodes),
+					onImpact: (node) => {
+						const idx = contextIndex(ctx);
+						const active = store.applicable(idx);
+						const costs = cacheCosts(ctx.model);
+						if (node.id.startsWith("sum:")) {
+							const record = store.get(node.id.slice(4));
+							if (record && !record.pending) {
+								return summaryToggleImpact(record, idx, state, active, lastSent, costs);
+							}
+							return {
+								deltaPerCall: 0,
+								extraBrokenTokens: 0,
+								extraRewrittenTokens: 0,
+								hasCache: (lastSent?.ids.length ?? 0) > 0,
+							};
+						}
+						return toggleImpact(node, idx, state, lastSent, costs, active);
+					},
 					onPreset: (preset, value) => {
 						if (preset.apply(state, contextIndex(ctx), value) > 0) persist();
 						refresh(ctx);

@@ -17,6 +17,7 @@
 
 import { droppedCallIds, type LeafIndex } from "./leaves.ts";
 import { type MaskableNode, MaskState, toggleNodeMask } from "./masking.ts";
+import { type SummaryRecord, summaryNodeId, summaryTokens } from "./summaries.ts";
 
 /** Cache pricing relative to plain input tokens, from the model's cost table. */
 export interface CacheCosts {
@@ -57,14 +58,35 @@ export interface SentSnapshot extends SentStream {
 	actualPrompt?: number;
 }
 
-/** Mirror of applyMask: which leaves go out, and at what (estimated) size. */
-export function sentStream(idx: LeafIndex, state: MaskState): SentStream {
+/** Mirror of applyMask + applySummaries: which items go out, and at what (estimated) size. */
+export function sentStream(idx: LeafIndex, state: MaskState, summaries: readonly SummaryRecord[] = []): SentStream {
 	const dropped = droppedCallIds(idx, state);
+	const covered = new Map<string, SummaryRecord>();
+	for (const r of summaries) for (const id of r.leafIds) covered.set(id, r);
+	const injected = new Set<string>();
 	const ids: string[] = [];
 	const tokens: number[] = [];
 	const stubbed: number[] = [];
 	let total = 0;
 	for (const leaf of idx.leaves) {
+		// Summarized leaves don't go out; the digest goes out once, where the
+		// first covered leaf that survives masking was (mirrors applySummaries).
+		const record = covered.get(leaf.id);
+		if (record) {
+			const survives =
+				leaf.kind === "tool-result"
+					? !(leaf.toolCallId && dropped.has(leaf.toolCallId))
+					: !state.anyMasked(leaf.chain);
+			if (survives && !injected.has(record.id)) {
+				injected.add(record.id);
+				const t = summaryTokens(record);
+				ids.push(summaryNodeId(record));
+				tokens.push(t);
+				stubbed.push(0);
+				total += t;
+			}
+			continue;
+		}
 		let sent: number;
 		let stub = 0;
 		if (leaf.kind === "tool-result") {
@@ -136,20 +158,41 @@ export interface ToggleImpact {
 	hasCache: boolean;
 }
 
-/** Preview a toggle without touching real state: clone, toggle, diff both streams. */
+/** Preview a mask toggle without touching real state: clone, toggle, diff both streams. */
 export function toggleImpact(
 	node: MaskableNode,
 	idx: LeafIndex,
 	state: MaskState,
 	snap: SentSnapshot | undefined,
 	costs: CacheCosts = DEFAULT_CACHE_COSTS,
+	summaries: readonly SummaryRecord[] = [],
 ): ToggleImpact {
 	const sim = new MaskState();
 	sim.load(state.toJSON());
 	toggleNodeMask(sim, node, idx.leaves);
+	return impactFromStreams(sentStream(idx, state, summaries), sentStream(idx, sim, summaries), snap, costs);
+}
 
-	const before = sentStream(idx, state);
-	const after = sentStream(idx, sim);
+/** Preview applying/restoring a summary: same math, toggling the record instead of a mask. */
+export function summaryToggleImpact(
+	record: SummaryRecord,
+	idx: LeafIndex,
+	state: MaskState,
+	summaries: readonly SummaryRecord[],
+	snap: SentSnapshot | undefined,
+	costs: CacheCosts = DEFAULT_CACHE_COSTS,
+): ToggleImpact {
+	const applied = summaries.some((r) => r.id === record.id);
+	const toggled = applied ? summaries.filter((r) => r.id !== record.id) : [...summaries, record];
+	return impactFromStreams(sentStream(idx, state, summaries), sentStream(idx, state, toggled), snap, costs);
+}
+
+function impactFromStreams(
+	before: SentStream,
+	after: SentStream,
+	snap: SentSnapshot | undefined,
+	costs: CacheCosts,
+): ToggleImpact {
 	const baseline = diffAgainstSnapshot(before, snap);
 	const toggled = diffAgainstSnapshot(after, snap);
 

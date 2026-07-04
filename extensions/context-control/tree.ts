@@ -14,6 +14,7 @@
 import { groups, pairId } from "./keys.ts";
 import { droppedCallIds, type LeafIndex, type LeafInfo, type LeafKind, leafEffective } from "./leaves.ts";
 import type { MaskState } from "./masking.ts";
+import { type SummaryRecord, summaryLabel, summaryNodeId, summaryTokens } from "./summaries.ts";
 
 export interface TreeNode {
 	id: string;
@@ -33,6 +34,47 @@ export interface TreeNode {
 	chain?: readonly string[];
 	/** Leaves: what kind of content this is (drives per-view affordances). */
 	kind?: LeafKind;
+}
+
+/**
+ * Span coverage shared by both builders: which leaves each applied summary
+ * replaces (they render at 0 effective), and where each record's synthetic
+ * node sits (at its first covered leaf, pending records included so an
+ * in-flight "generating…" row has a position too).
+ */
+function summaryCoverage(idx: LeafIndex, records: readonly SummaryRecord[]) {
+	const applied = new Set<string>();
+	const nodeAt = new Map<string, SummaryRecord>();
+	const placed = new Set<string>();
+	const byLeaf = new Map<string, SummaryRecord>();
+	for (const r of records) for (const id of r.leafIds) byLeaf.set(id, r);
+	for (const leaf of idx.leaves) {
+		const r = byLeaf.get(leaf.id);
+		if (!r) continue;
+		if (!r.pending) applied.add(leaf.id);
+		if (!placed.has(r.id)) {
+			placed.add(r.id);
+			nodeAt.set(leaf.id, r);
+		}
+	}
+	return { applied, nodeAt };
+}
+
+/** Synthetic row standing in for a summarized span. raw is 0: unmasking it removes the digest. */
+function summaryLeaf(record: SummaryRecord, turnId: string): { info: LeafInfo; effective: number } {
+	const id = summaryNodeId(record);
+	return {
+		info: {
+			id,
+			kind: "summary",
+			chain: [id],
+			turnId,
+			label: summaryLabel(record),
+			raw: 0,
+			timestamp: record.createdAt,
+		},
+		effective: summaryTokens(record),
+	};
 }
 
 export interface ContextTreeModel {
@@ -112,16 +154,22 @@ class TreeBuilder {
 }
 
 /** General view: role → content-type → tool. */
-export function buildTree(idx: LeafIndex, state: MaskState): ContextTreeModel {
+export function buildTree(idx: LeafIndex, state: MaskState, summaries: readonly SummaryRecord[] = []): ContextTreeModel {
 	const b = new TreeBuilder(state);
 	const droppedCalls = droppedCallIds(idx, state);
+	const { applied, nodeAt } = summaryCoverage(idx, summaries);
 
 	const assistant = b.group(groups.assistant, "assistant", null);
 	const user = b.group(groups.user, "user", null);
 	const tool = b.group(groups.tool, "tool", null);
 
 	for (const leaf of idx.leaves) {
-		const effective = leafEffective(leaf, state, droppedCalls);
+		const record = nodeAt.get(leaf.id);
+		if (record) {
+			const sum = summaryLeaf(record, leaf.turnId);
+			b.leaf(b.group(groups.metaFor("summary"), "summary", b.group(groups.meta, "meta", null)), sum.info, sum.effective);
+		}
+		const effective = applied.has(leaf.id) ? 0 : leafEffective(leaf, state, droppedCalls);
 		switch (leaf.kind) {
 			case "assistant-text":
 				b.leaf(b.group(groups.assistantText, "text", assistant), leaf, effective);
@@ -173,14 +221,24 @@ export function buildTree(idx: LeafIndex, state: MaskState): ContextTreeModel {
 }
 
 /** Session view: turn → items in chronological order, call+result paired. */
-export function buildSessionTree(idx: LeafIndex, state: MaskState): ContextTreeModel {
+export function buildSessionTree(
+	idx: LeafIndex,
+	state: MaskState,
+	summaries: readonly SummaryRecord[] = [],
+): ContextTreeModel {
 	const b = new TreeBuilder(state);
 	const droppedCalls = droppedCallIds(idx, state);
+	const { applied, nodeAt } = summaryCoverage(idx, summaries);
 	const turnLabels = new Map(idx.turns.map((t, i) => [t.id, `turn ${i + 1} · ${t.label}`]));
 
 	for (const leaf of idx.leaves) {
-		const effective = leafEffective(leaf, state, droppedCalls);
+		const effective = applied.has(leaf.id) ? 0 : leafEffective(leaf, state, droppedCalls);
 		const turn = b.group(leaf.turnId, turnLabels.get(leaf.turnId) ?? leaf.turnId, null);
+		const record = nodeAt.get(leaf.id);
+		if (record) {
+			const sum = summaryLeaf(record, leaf.turnId);
+			b.leaf(turn, sum.info, sum.effective);
+		}
 		switch (leaf.kind) {
 			case "user-text":
 				b.leaf(turn, leaf, effective, `user · ${leaf.label}`);

@@ -26,7 +26,9 @@ export type LeafKind =
 	| "tool-result"
 	| "user-text"
 	| "user-image"
-	| "meta";
+	| "meta"
+	/** Synthetic tree row for a summarized span — never produced by indexLeaves. */
+	| "summary";
 
 export interface LeafInfo {
 	id: string;

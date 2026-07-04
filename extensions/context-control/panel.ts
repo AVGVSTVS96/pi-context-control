@@ -41,6 +41,8 @@ export interface CacheStatus {
 export interface PanelCallbacks {
 	/** Toggle mask state for a node; caller rebuilds the models and calls setModels(). */
 	onToggleMask: (node: TreeNode) => void;
+	/** Summarize the selected row range (session view); caller validates and generates. */
+	onSummarize: (nodes: TreeNode[]) => void;
 	/** Preview what toggling this node would do to per-call cost and the cache. */
 	onImpact: (node: TreeNode) => ToggleImpact;
 	/** Apply a mask preset with its current value; caller rebuilds and calls setModels(). */
@@ -78,6 +80,11 @@ export class ContextPanel implements Focusable {
 	private presetValues: Record<string, number>;
 	private presetMode = false;
 	private presetSelected = 0;
+
+	/** First endpoint of an in-progress summarize range (session view). */
+	private anchorId: string | undefined;
+	/** One-shot footer message (cleared on the next key). */
+	private notice: string | undefined;
 
 	private cacheStatus: CacheStatus = { hasSnapshot: false };
 	private impactMemo: { id: string; impact: ToggleImpact } | undefined;
@@ -118,7 +125,21 @@ export class ContextPanel implements Focusable {
 			if (idx >= 0) this.selected[this.view] = idx;
 		}
 		this.selected[this.view] = Math.min(this.selected[this.view], Math.max(0, this.rows.length - 1));
+		if (this.anchorId && this.rowIndexOf(this.anchorId) < 0) this.anchorId = undefined;
 		this.tui.requestRender();
+	}
+
+	private rowIndexOf(id: string): number {
+		return this.rows.findIndex((r) => r.node.id === id);
+	}
+
+	/** Row index range of the in-progress summarize selection, inclusive. */
+	private anchorRange(): [number, number] | undefined {
+		if (!this.anchorId) return undefined;
+		const a = this.rowIndexOf(this.anchorId);
+		if (a < 0) return undefined;
+		const b = this.selected[this.view];
+		return a <= b ? [a, b] : [b, a];
 	}
 
 	setCacheStatus(status: CacheStatus): void {
@@ -136,6 +157,17 @@ export class ContextPanel implements Focusable {
 
 	/** "mask: saves ~1.2K/call · rewrites ~8.0K cached · pays off in ~5 calls" */
 	private impactText(node: TreeNode): string {
+		if (node.kind === "summary") {
+			if (node.effectiveTokens === 0) return "summarizing…";
+			const impact = this.impactFor(node);
+			const delta = impact.deltaPerCall;
+			const verb = delta < 0 ? `adds ~${formatCompact(-delta)}/call back` : `saves ~${formatCompact(delta)}/call`;
+			const rewritten = impact.extraRewrittenTokens;
+			if (!impact.hasCache) return `restore: ${verb}`;
+			return rewritten > 0
+				? `restore: ${verb} · rewrites ~${formatCompact(rewritten)} cached`
+				: `restore: ${verb} · breaks no cache`;
+		}
 		const impact = this.impactFor(node);
 		const delta = impact.deltaPerCall;
 		const rewritten = impact.extraRewrittenTokens;
@@ -244,7 +276,13 @@ export class ContextPanel implements Focusable {
 
 	private handleTreeInput(data: string): void {
 		const row = this.rows[this.selected[this.view]];
+		this.notice = undefined;
 		if (matchesKey(data, "escape") || data === "q" || matchesKey(data, "ctrl+alt+c")) {
+			// esc backs out of an in-progress range before it closes the panel.
+			if (this.anchorId && matchesKey(data, "escape")) {
+				this.anchorId = undefined;
+				return;
+			}
 			this.callbacks.onClose();
 			return;
 		}
@@ -258,8 +296,28 @@ export class ContextPanel implements Focusable {
 			return;
 		}
 		if (data === "v") {
+			this.anchorId = undefined;
 			this.view = this.view === "general" ? "session" : "general";
 			this.rebuildRows();
+			return;
+		}
+		if (data === "s") {
+			if (this.view !== "session") {
+				this.notice = "summaries live in the session view — <v> to switch";
+				return;
+			}
+			if (!row) return;
+			const range = this.anchorRange();
+			if (!range) {
+				if (row.node.kind === "summary") {
+					this.notice = "already a summary — <space> restores the originals";
+					return;
+				}
+				this.anchorId = row.node.id;
+				return;
+			}
+			this.anchorId = undefined;
+			this.callbacks.onSummarize(this.rows.slice(range[0], range[1] + 1).map((r) => r.node));
 			return;
 		}
 		if (matchesKey(data, "up")) {
@@ -382,7 +440,11 @@ export class ContextPanel implements Focusable {
 						? "typing in editor — /ctx or ctrl+alt+c to control the panel"
 						: this.presetMode
 							? "↑↓ move · ←→ adjust ‹value› · <enter> apply · <1-9> quick apply · <esc> back"
-							: "↑↓ move · ←→ fold · <space> mask · <tab> raw/eff · <v> view · <p> presets · <i> input · <esc> close",
+							: this.anchorId
+								? "↑↓ extend range · <s> summarize selection · <esc> cancel"
+								: this.view === "session"
+									? "↑↓ move · <space> mask · <s> summarize · <tab> raw/eff · <v> view · <p> presets · <esc> close"
+									: "↑↓ move · ←→ fold · <space> mask · <tab> raw/eff · <v> view · <p> presets · <i> input · <esc> close",
 				),
 			),
 		);
@@ -412,6 +474,7 @@ export class ContextPanel implements Focusable {
 		const visible = Math.min(BODY_MAX_ROWS, this.rows.length);
 		const scroll = this.scroll[this.view];
 		const boundary = this.boundaryRowIndex();
+		const range = this.focused ? this.anchorRange() : undefined;
 		for (let i = scroll; i < scroll + visible; i++) {
 			const row = this.rows[i];
 			if (!row) break;
@@ -421,16 +484,46 @@ export class ContextPanel implements Focusable {
 				const label = "┄┄ cache breaks here · everything below is rewritten next call ";
 				lines.push(boxRow(th.fg("warning", label.slice(0, innerW - 2).padEnd(innerW - 2, "┄"))));
 			}
-			lines.push(this.renderRow(row, i === this.selected[this.view], innerW));
+			const inRange = range !== undefined && i >= range[0] && i <= range[1];
+			lines.push(this.renderRow(row, i === this.selected[this.view] || inRange, innerW));
 		}
 
-		// Footer: position + what toggling the selected node would cost/save.
+		// Footer: position + a notice, the pending range, or the selected node's impact.
 		const selectedRow = this.rows[this.selected[this.view]];
 		const pos = th.fg("dim", `(${this.rows.length === 0 ? 0 : this.selected[this.view] + 1}/${this.rows.length})`);
-		const impact = selectedRow && this.focused ? this.impactText(selectedRow.node) : "";
-		lines.push(boxRow(impact ? `${pos}${th.fg("muted", " · ")}${th.fg("text", impact.slice(0, innerW - 12))}` : pos));
+		let info = "";
+		if (this.notice) info = this.notice;
+		else if (range) {
+			const stats = this.rangeStats(range);
+			info = `summarize: ~${formatCompact(stats.tokens)} across ${stats.items} item${stats.items === 1 ? "" : "s"} — <s> to confirm`;
+		} else if (selectedRow && this.focused) {
+			info = this.impactText(selectedRow.node);
+		}
+		lines.push(boxRow(info ? `${pos}${th.fg("muted", " · ")}${th.fg("text", info.slice(0, innerW - 12))}` : pos));
 		lines.push(th.fg("border", `╰${"─".repeat(innerW)}╯`));
 		return lines;
+	}
+
+	/** Unique leaves under the range rows (summary rows excluded — they can't be re-summarized). */
+	private rangeStats(range: [number, number]): { items: number; tokens: number } {
+		const seen = new Set<string>();
+		let tokens = 0;
+		const visit = (n: TreeNode) => {
+			if (n.kind === "summary") return;
+			if (n.isLeaf) {
+				if (!seen.has(n.id)) {
+					seen.add(n.id);
+					tokens += n.rawTokens;
+				}
+				return;
+			}
+			n.children.forEach(visit);
+		};
+		for (let i = range[0]; i <= range[1]; i++) {
+			const row = this.rows[i];
+			if (row) visit(row.node);
+		}
+		return { items: seen.size, tokens };
 	}
 
 	private renderPresetRow(index: number, isSelected: boolean, innerW: number): string {
@@ -451,8 +544,11 @@ export class ContextPanel implements Focusable {
 		const partial = !node.masked && node.effectiveTokens < node.rawTokens;
 
 		// Markers show MASK state only: ✕ masked · ◐ partially masked · ○ in
-		// context. Folded nodes show their label in bold instead.
-		const marker = node.masked ? "✕" : partial ? "◐" : "○";
+		// context · § a summary standing in for replaced content. Folded nodes
+		// show their label in bold instead.
+		const isSummary = node.kind === "summary";
+		const generating = isSummary && node.effectiveTokens === 0;
+		const marker = isSummary ? "§" : node.masked ? "✕" : partial ? "◐" : "○";
 		const folded = !node.isLeaf && !this.expanded.has(node.id);
 
 		const labelW = Math.max(10, innerW - COUNT_COL - TOKEN_COL - 12);
@@ -468,7 +564,10 @@ export class ContextPanel implements Focusable {
 		// Colors
 		let markerColored: string;
 		let labelColored: string;
-		if (node.masked) {
+		if (isSummary) {
+			markerColored = th.fg(generating ? "dim" : "success", marker);
+			labelColored = th.fg(generating ? "dim" : "text", label);
+		} else if (node.masked) {
 			markerColored = th.fg("error", marker);
 			labelColored = th.fg("dim", th.strikethrough(label));
 		} else if (partial) {

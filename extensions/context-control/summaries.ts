@@ -1,7 +1,7 @@
 /**
  * Non-destructive span summarization.
  *
- * A span is whatever contiguous slice of the session view the user selected —
+ * A span is whatever contiguous slice of the session view the user selected:
  * one turn, several turns, or a run of items inside a turn. An LLM call
  * distills the span into a compact digest; from then on the `context` event
  * drops the span's leaves and injects the digest at their position. The
@@ -31,7 +31,7 @@ export interface SummaryRecord {
 	model: string;
 	/** Applied at context time; false = originals restored (text kept for free re-apply). */
 	active: boolean;
-	/** Generation in flight — shown in the tree but not applied yet. Not persisted. */
+	/** Generation in flight: shown in the tree but not applied yet. Not persisted. */
 	pending?: boolean;
 	createdAt: number;
 }
@@ -81,7 +81,7 @@ export class SummaryStore {
 
 	/**
 	 * Records the tree should show: in-flight ones, and every record whose
-	 * span still exists — including inactive (restored) ones, which render as
+	 * span still exists, including inactive (restored) ones, which render as
 	 * a dimmed row so a summary is never lost by toggling it off.
 	 */
 	visible(idx: LeafIndex): SummaryRecord[] {
@@ -125,7 +125,7 @@ export class SummaryStore {
 /**
  * Leaf ids covered by a range of tree nodes, whole pairs enforced: a tool
  * call pulls in its result and vice versa (an unpaired call or result would
- * be rejected by providers). Summary rows inside the range are transparent —
+ * be rejected by providers). Summary rows inside the range are transparent:
  * a span always addresses the original leaves, and re-summarizing simply
  * replaces the old record on completion.
  */
@@ -281,7 +281,7 @@ export function applySummaries(messages: AnyMessage[], records: readonly Summary
 	return out;
 }
 
-/** The span's messages only (covered blocks kept, everything else stripped) — the generation input. */
+/** The span's messages only (covered blocks kept, everything else stripped): the generation input. */
 export function spanMessages(messages: AnyMessage[], span: ReadonlySet<string>): AnyMessage[] {
 	const out: AnyMessage[] = [];
 	for (const m of messages) {

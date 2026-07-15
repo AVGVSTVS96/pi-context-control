@@ -373,7 +373,7 @@ const idx = indexLeaves(messages);
 	// Tiny result whose stub costs the same tokens: the bytes still change, so
 	// it must register as a break even though the size diff is zero.
 	const tiny = new MaskState();
-	tiny.add("result:tc2"); // "total 42\ndrwxr" — stub is bigger, clamped to raw
+	tiny.add("result:tc2"); // "total 42\ndrwxr": stub is bigger, clamped to raw
 	const tinyBrk = diffAgainstSnapshot(sentStream(idx, sendPlan(tiny)), snap);
 	check("same-size stub still breaks the cache", tinyBrk.breakLeafId === "result:tc2", tinyBrk);
 	const tinyImpact = editImpact(idx, sendPlan(clean), toggleNodeEdit(nodeMap(buildTree(idx, clean)).get("result:tc2")!, idx.leaves), snap);

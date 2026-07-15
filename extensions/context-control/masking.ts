@@ -59,7 +59,7 @@ export class MaskState {
 }
 
 /**
- * Covering chains — shared vocabulary between the leaf index, the trees, and
+ * Covering chains: shared vocabulary between the leaf index, the trees, and
  * the transform. Ordered outermost group → leaf id (own id included last).
  * The pair id covers only the RESULT: masking a pair row stubs the result
  * but keeps the call, so the exchange stays visible to the model.
@@ -117,7 +117,7 @@ function collectLeafRefs(node: MaskableNode, out: LeafRef[] = []): LeafRef[] {
 }
 
 /**
- * Toggle a node's mask — a clean two-state cycle no matter how the current
+ * Toggle a node's mask, a clean two-state cycle no matter how the current
  * masks came about:
  *
  *   anything masked in/over this subtree → clear it all (fully visible)

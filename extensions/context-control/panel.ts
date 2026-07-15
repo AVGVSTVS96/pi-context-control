@@ -199,7 +199,7 @@ export class ContextPanel implements Focusable {
 		if (delta === 0) {
 			// A stub can cost as much as a tiny result: masking changes the bytes
 			// (breaking the cache) without shrinking anything.
-			return rewritten > 0 ? `mask: saves nothing · rewrites ~${formatCompact(rewritten)} cached — not worth it` : "";
+			return rewritten > 0 ? `mask: saves nothing · rewrites ~${formatCompact(rewritten)} cached · not worth it` : "";
 		}
 		if (delta < 0) {
 			const base = `unmask: adds ~${formatCompact(-delta)}/call back`;
@@ -213,7 +213,7 @@ export class ContextPanel implements Focusable {
 		return `${base} · rewrites ~${formatCompact(rewritten)} cached · pays off in ~${calls} call${calls === 1 ? "" : "s"}`;
 	}
 
-	/** Leaves the current masks hide — same number the below-editor widget shows. */
+	/** Leaves the current masks hide; the same number the below-editor widget shows. */
 	private maskedItemCount(): number {
 		let n = 0;
 		const walk = (node: TreeNode) => {
@@ -333,14 +333,14 @@ export class ContextPanel implements Focusable {
 		}
 		if (data === "s") {
 			if (this.view !== "session") {
-				this.notice = "summaries live in the session view — <v> to switch";
+				this.notice = "summaries live in the session view · <v> to switch";
 				return;
 			}
 			if (!row) return;
 			const range = this.anchorRange();
 			if (!range) {
 				if (row.node.kind === "summary") {
-					this.notice = "already a summary — <space> applies/restores it";
+					this.notice = "already a summary · <space> applies/restores it";
 					return;
 				}
 				this.anchorId = row.node.id;
@@ -366,7 +366,7 @@ export class ContextPanel implements Focusable {
 					this.detailNode = row.node;
 					this.detailScroll = 0;
 				} else {
-					this.notice = "still generating — <enter> shows the digest once it's done";
+					this.notice = "still generating · <enter> shows the digest once it's done";
 				}
 				return;
 			}
@@ -494,9 +494,9 @@ export class ContextPanel implements Focusable {
 
 		// Header
 		const title = this.presetMode
-			? "Context Token Usage — presets"
+			? "Context Token Usage · presets"
 			: this.detailNode
-				? "Context Token Usage — summary digest"
+				? "Context Token Usage · summary digest"
 				: `Context Token Usage (${this.mode} · ${this.view} view)`;
 		lines.push(boxRow(th.bold(th.fg("accent", title))));
 		const raw = this.model.rawTotal;
@@ -523,7 +523,7 @@ export class ContextPanel implements Focusable {
 				th.fg(
 					"dim",
 					!this.focused
-						? "typing in editor — /ctx or ctrl+alt+c to control the panel"
+						? "typing in editor · /ctx or ctrl+alt+c to control the panel"
 						: this.presetMode
 							? "↑↓ move · ←→ adjust ‹value› · <enter> apply · <1-9> quick apply · <esc> back"
 							: this.detailNode
@@ -611,7 +611,7 @@ export class ContextPanel implements Focusable {
 				: impact.extraRewrittenTokens > 0
 					? ` · rewrites ~${formatCompact(impact.extraRewrittenTokens)} cached`
 					: " · breaks no cache";
-			info = `summarize: ~${formatCompact(stats.tokens)} across ${stats.items} item${stats.items === 1 ? "" : "s"}${cache} — <s> to confirm`;
+			info = `summarize: ~${formatCompact(stats.tokens)} across ${stats.items} item${stats.items === 1 ? "" : "s"}${cache} · <s> to confirm`;
 		} else if (selectedRow && this.focused) {
 			info = this.impactText(selectedRow.node);
 		}
@@ -620,7 +620,7 @@ export class ContextPanel implements Focusable {
 		return lines;
 	}
 
-	/** Unique leaves under the range rows (summary rows excluded — they can't be re-summarized). */
+	/** Unique leaves under the range rows (summary rows excluded; they can't be re-summarized). */
 	private rangeStats(range: [number, number]): { items: number; tokens: number } {
 		const seen = new Set<string>();
 		let tokens = 0;

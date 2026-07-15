@@ -27,7 +27,7 @@ export type LeafKind =
 	| "user-text"
 	| "user-image"
 	| "meta"
-	/** Synthetic tree row for a summarized span — never produced by indexLeaves. */
+	/** Synthetic tree row for a summarized span; never produced by indexLeaves. */
 	| "summary";
 
 export interface LeafInfo {
@@ -91,7 +91,7 @@ export function maskedLeafCount(state: MaskState, idx: LeafIndex): number {
 
 /**
  * Drop mask ids that reference content no longer in the session (turns,
- * pairs, or individual items — anything with a ":" in its id). Such ids can
+ * pairs, or individual items: anything with a ":" in its id). Such ids can
  * linger after compaction or from older toggle semantics; they hide nothing
  * but inflate the mask count. Group ids (no ":") are kept: they are armed
  * rules that legitimately cover matching content as it arrives.

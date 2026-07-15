@@ -1,5 +1,5 @@
 /**
- * Cache awareness — what masking does to the prompt cache.
+ * Cache awareness: what masking does to the prompt cache.
  *
  * Prompt caching is prefix-based: the provider caches the prompt exactly as
  * sent on the last call, and the next call reuses the longest unchanged
@@ -9,8 +9,8 @@
  * every later call. So masking near the tail is nearly free, while masking
  * early content pays a large one-time rewrite for a small per-call saving.
  *
- * We snapshot the outgoing leaf stream on every `context` event — that is
- * precisely what the provider cached — and diff the would-send stream
+ * We snapshot the outgoing leaf stream on every `context` event (that is
+ * precisely what the provider cached) and diff the would-send stream
  * against it to find the earliest break point, price pending changes, and
  * preview the marginal impact of any plan edit (editImpact).
  */
@@ -31,7 +31,7 @@ export const DEFAULT_CACHE_COSTS: CacheCosts = { writeMult: 1.25, readMult: 0.1 
 /**
  * Derive multipliers from the active model's per-token rates. A zero
  * cacheWrite rate means the provider bills cache misses as plain input
- * (OpenAI, Gemini) — a 1x write, not a free one.
+ * (OpenAI, Gemini): a 1x write, not a free one.
  */
 export function cacheCosts(model?: { cost?: { input: number; cacheRead: number; cacheWrite: number } }): CacheCosts {
 	const c = model?.cost;
@@ -47,7 +47,7 @@ export interface SentStream {
 	ids: string[];
 	tokens: number[];
 	/** 1 when the leaf went out as a stub, 0 raw. A stub can cost the same
-	 *  tokens as a tiny result while still being different bytes — and
+	 *  tokens as a tiny result while still being different bytes, and
 	 *  different bytes is what breaks the cache. */
 	stubbed: number[];
 	total: number;
@@ -118,7 +118,7 @@ export interface BreakInfo {
 
 /**
  * Find where `current` first diverges from the cached snapshot. Appending new
- * content is not a break — that suffix is written to cache regardless. Only
+ * content is not a break; that suffix is written to cache regardless. Only
  * changes within the snapshot's length invalidate cached tokens.
  */
 export function diffAgainstSnapshot(current: SentStream, snap: SentSnapshot | undefined): BreakInfo {
@@ -155,7 +155,7 @@ export interface Impact {
 	extraRewrittenTokens: number;
 	/** Calls until the one-time rewrite cost is repaid by the per-call saving. */
 	paybackCalls?: number;
-	/** False until a call has happened (nothing cached — every change is free). */
+	/** False until a call has happened (nothing cached, every change is free). */
 	hasCache: boolean;
 }
 

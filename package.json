@@ -1,9 +1,16 @@
 {
     "name": "pi-context-control",
     "version": "0.1.0",
-    "description": "Interactive context window manager for pi: see per-message token usage and mask anything in/out of context at will.",
+    "description": "Interactive context window manager for pi: see per-message token usage, mask anything in or out of context, and swap spans for compact LLM summaries.",
     "type": "module",
     "license": "MIT",
+    "author": "Bassim Shahidy",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/AVGVSTVS96/pi-context-control.git"
+    },
+    "homepage": "https://github.com/AVGVSTVS96/pi-context-control#readme",
+    "bugs": "https://github.com/AVGVSTVS96/pi-context-control/issues",
     "files": [
         "extensions",
         "README.md",

@@ -1,8 +1,8 @@
 /**
  * The two tree models the panel can show, built from the same leaf index:
  *
- *  - buildTree:        general view — role → content-type → tool → messages
- *  - buildSessionTree: session view — turn → items in order, with each tool
+ *  - buildTree:        general view: role → content-type → tool → messages
+ *  - buildSessionTree: session view: turn → items in order, with each tool
  *                      call and its result merged into one "pair" row
  *
  * "raw" is what an item costs as recorded; "effective" is what it will cost
@@ -42,7 +42,7 @@ export interface TreeNode {
  * Span coverage shared by both builders: which leaves each APPLIED summary
  * replaces (they render at 0 effective), and where each record's synthetic
  * node sits (at its first covered leaf). Pending and inactive records get a
- * row too — "generating…" and a dimmed re-appliable summary — but cover
+ * row too ("generating…" and a dimmed re-appliable summary) but cover
  * nothing until applied.
  */
 function summaryCoverage(idx: LeafIndex, records: readonly SummaryRecord[]) {

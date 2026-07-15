@@ -1,13 +1,13 @@
 /**
- * The send plan — the one object that decides what goes out on the next LLM
- * call (mask state + summary records) — and plan edits, the only way user
+ * The send plan, the one object that decides what goes out on the next LLM
+ * call (mask state + summary records), and plan edits, the only way user
  * actions change it.
  *
  * Every action that changes what is sent is written ONCE as a PlanEdit and
  * used twice: run against the live plan to take effect, and run against a
  * clone to be priced against the prompt cache (cache.editImpact) before the
  * key is pressed. Because preview and action share the same edit, the cache
- * math can never drift from what a keypress actually does — a new kind of
+ * math can never drift from what a keypress actually does: a new kind of
  * edit gets cache awareness by construction.
  */
 
@@ -25,7 +25,7 @@ export interface SendPlan {
 
 /**
  * One user action's effect on the plan, in place. The caller decides whether
- * the plan is live (commit) or a clone (preview) — the edit cannot tell.
+ * the plan is live (commit) or a clone (preview); the edit cannot tell.
  */
 export type PlanEdit = (plan: SendPlan) => void;
 
@@ -42,7 +42,7 @@ export function clonePlan(plan: SendPlan): SendPlan {
 
 /**
  * The context transform: masks first, then summary swaps. cache.sentStream
- * prices exactly this — the two must agree on ordering and coverage.
+ * prices exactly this; the two must agree on ordering and coverage.
  */
 export function applyPlan(messages: AnyMessage[], idx: LeafIndex, plan: SendPlan): AnyMessage[] {
 	const out = applyMask(messages, plan.masks);
@@ -115,7 +115,7 @@ export function toggleSummaryEdit(recordId: string): PlanEdit {
  * The swap a confirmed `s` selection will make, for pricing before the digest
  * exists: a draft record with empty text stands in. Break and rewrite numbers
  * are exact (the digest is new bytes either way); the per-call saving is an
- * upper bound. Preview-only — the real record is added when generation starts.
+ * upper bound. Preview-only; the real record is added when generation starts.
  */
 export function summarizeSpanEdit(leafIds: readonly string[]): PlanEdit {
 	return (plan) => {

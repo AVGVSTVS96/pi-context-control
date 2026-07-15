@@ -1,12 +1,12 @@
 /**
- * pi-context-control — interactive context window manager for pi.
+ * pi-context-control: interactive context window manager for pi.
  *
  * /ctx opens a panel showing everything in the current LLM context with token
  * estimates, in two views ("v" toggles): general (role → type → tool) and
  * session (turn → items in order). Any node can be masked out of context.
  *
  * Masking is applied on the `context` event before every LLM call and never
- * modifies the session file — everything is reversible.
+ * modifies the session file; everything is reversible.
  */
 
 import { existsSync, readFileSync } from "node:fs";
@@ -94,7 +94,7 @@ export default function contextControl(pi: ExtensionAPI): void {
 	let panel: ContextPanel | undefined;
 	let panelFocused = false;
 	let closePanel: (() => void) | undefined;
-	/** What the last LLM call actually sent (post-mask) — i.e. what is cached. */
+	/** What the last LLM call actually sent (post-mask), i.e. what is cached. */
 	let lastSent: SentSnapshot | undefined;
 
 	function contextMessages(ctx: ExtensionContext): AnyMessage[] {
@@ -118,13 +118,13 @@ export default function contextControl(pi: ExtensionAPI): void {
 		refresh(ctx);
 	}
 
-	/** Price a user action before it happens — identical edit, cloned plan. */
+	/** Price a user action before it happens: identical edit, cloned plan. */
 	function previewImpact(ctx: ExtensionContext, editOf: (idx: LeafIndex) => PlanEdit): Impact {
 		const idx = contextIndex(ctx);
 		return editImpact(idx, livePlan(), editOf(idx), lastSent, cacheCosts(ctx.model));
 	}
 
-	/** What space does on a row — shared by the commit and its footer preview. */
+	/** What space does on a row, shared by the commit and its footer preview. */
 	function editFor(node: TreeNode, idx: LeafIndex): PlanEdit {
 		return node.id.startsWith("sum:") ? toggleSummaryEdit(node.id.slice(4)) : toggleNodeEdit(node, idx.leaves);
 	}
@@ -235,7 +235,7 @@ export default function contextControl(pi: ExtensionAPI): void {
 	}
 
 	// The transform hook: filter/rewrite the outgoing messages on every LLM
-	// call — masks first, then summarized spans swap for their digests. Also
+	// call: masks first, then summarized spans swap for their digests. Also
 	// the cache bookkeeping moment: what goes out on this call is exactly
 	// what the provider will have cached when the next one is planned.
 	pi.on("context", async (event) => {
@@ -291,12 +291,12 @@ export default function contextControl(pi: ExtensionAPI): void {
 			const parsed = parseModelSpec(spec);
 			const found = parsed && ctx.modelRegistry.find(parsed.provider, parsed.id);
 			if (found) return found;
-			ctx.ui.notify(`summarize model "${spec}" not found — using the session model`, "warning");
+			ctx.ui.notify(`summarize model "${spec}" not found, using the session model`, "warning");
 		}
 		return ctx.model;
 	}
 
-	/** Space on a generating row cancels it — record lifecycle, not a plan edit. */
+	/** Space on a generating row cancels it: record lifecycle, not a plan edit. */
 	function cancelGeneration(ctx: ExtensionContext, record: SummaryRecord): void {
 		generations.get(record.id)?.abort();
 		generations.delete(record.id);
@@ -315,12 +315,12 @@ export default function contextControl(pi: ExtensionAPI): void {
 		const existing = store.findBySpan(span);
 		if (existing) {
 			if (existing.pending) {
-				ctx.ui.notify("already summarizing that range — the § row fills in when it's done", "info");
+				ctx.ui.notify("already summarizing that range · the § row fills in when it's done", "info");
 			} else if (existing.active) {
-				ctx.ui.notify("that range is already summarized — <enter> on the § row shows the digest", "info");
+				ctx.ui.notify("that range is already summarized · <enter> on the § row shows the digest", "info");
 			} else {
 				commit(ctx, toggleSummaryEdit(existing.id));
-				ctx.ui.notify("re-applied the stored summary — no LLM call needed", "info");
+				ctx.ui.notify("re-applied the stored summary · no LLM call needed", "info");
 			}
 			return;
 		}
@@ -348,7 +348,7 @@ export default function contextControl(pi: ExtensionAPI): void {
 		store.add(record);
 		refresh(ctx); // shows the "generating…" row immediately
 		ctx.ui.notify(
-			`summarizing ${span.length} item${span.length === 1 ? "" : "s"} in the background — the § row fills in when done`,
+			`summarizing ${span.length} item${span.length === 1 ? "" : "s"} in the background · the § row fills in when done`,
 			"info",
 		);
 

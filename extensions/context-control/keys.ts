@@ -3,7 +3,7 @@
  *
  * pi's buildSessionContext() pushes each session entry's message object into
  * the context verbatim (the `context` event hands us a deep copy), so the
- * message's own fields — role, numeric timestamp, toolCallId — survive the
+ * message's own fields (role, numeric timestamp, toolCallId) survive the
  * round trip and can be used to correlate what the panel shows (built from
  * the session) with what the context event delivers (about to hit the LLM).
  */
